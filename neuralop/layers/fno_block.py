@@ -132,6 +132,7 @@ class FNOBlocks(nn.Module):
         implementation="factorized",
         decomposition_kwargs=dict(),
         enforce_hermitian_symmetry=True,
+        no_br=False,
     ):
         super().__init__()
         if isinstance(n_modes, int):
@@ -165,6 +166,7 @@ class FNOBlocks(nn.Module):
         self.preactivation = preactivation
         self.ada_in_features = ada_in_features
         self.enforce_hermitian_symmetry = enforce_hermitian_symmetry
+        self.no_br = no_br
 
         # apply real nonlin if data is real, otherwise CGELU
         if self.complex_data:
@@ -194,9 +196,12 @@ class FNOBlocks(nn.Module):
                     fno_block_precision=fno_block_precision,
                     decomposition_kwargs=decomposition_kwargs,
                     complex_data=complex_data,
-                    # Only SpectralConv (and subclasses) accept enforce_hermitian_symmetry. Others ignore it
+                    # Only SpectralConv (and subclasses) accept these flags; others ignore them
                     **(
-                        {"enforce_hermitian_symmetry": enforce_hermitian_symmetry}
+                        {
+                            "enforce_hermitian_symmetry": enforce_hermitian_symmetry,
+                            "no_br": no_br,
+                        }
                         if issubclass(conv_module, SpectralConv)
                         else {}
                     ),

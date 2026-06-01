@@ -64,7 +64,7 @@ def _contract_cp(x, cp_weight, separable=False):
     else:
         out_syms[1] = out_sym
         factor_syms = [einsum_symbols[1] + rank_sym, out_sym + rank_sym]  # in, out
-    factor_syms += [xs + rank_sym for xs in x_syms[2:]]  # x, y, ...
+    factor_syms += [xs + rank_sym for einsum_symbols[order] in x_syms[2:]]  # x, y, ...
     eq = f'{x_syms},{rank_sym},{",".join(factor_syms)}->{"".join(out_syms)}'
 
     if x.dtype == torch.complex32:
@@ -251,12 +251,24 @@ class SpectralConv(BaseSpectralConv):
     enforce_hermitian_symmetry : bool, optional
         Whether to enforce Hermitian symmetry conditions when performing inverse FFT
         for real-valued data. When True, explicitly enforces that the 0th frequency
-        and Nyquist frequency are real-valued before calling irfft. 
-        When False, relies on cuFFT's irfftn to handle symmetry automatically, 
-        which may fail on certain GPUs or input sizes, causing line artifacts. 
-        Setting to True splits the inverse FFT into ifftn along (n-1) dimensions 
-        followed by irfft on the last dimension, with a small computational overhead. 
+        and Nyquist frequency are real-valued before calling irfft.
+        When False, relies on cuFFT's irfftn to handle symmetry automatically,
+        which may fail on certain GPUs or input sizes, causing line artifacts.
+        Setting to True splits the inverse FFT into ifftn along (n-1) dimensions
+        followed by irfft on the last dimension, with a small computational overhead.
         By default True.
+    no_br : bool, optional
+        Bit-reversal-free mode for TPU/XLA efficiency. When True, the forward pass
+        runs raw Cooley-Tukey butterfly stages without the bit-reversal permutation
+        that normally bookends each FFT and IFFT. Instead, the spectral weight
+        tensor R is permuted once at initialisation time (offline, zero runtime cost)
+        so that it indexes the bit-reversed frequency layout produced by the butterflies.
+        Because DIT-FFT and DIF-IFFT both introduce the same bit-reversal permutation
+        (P² = I), the two bit-reversals cancel and the spatial output of each layer
+        is identical to the standard path -- no changes to W (skip), activations,
+        norms, or surrounding lifting/projection layers are required.
+        When False (default), the standard rfftn/irfftn path is used unchanged.
+        By default False.
     fixed_rank_modes : bool, optional
         Modes to not factorize, by default False.
         Ignored if ``factorization is None``.
@@ -297,6 +309,7 @@ class SpectralConv(BaseSpectralConv):
         factorization=None,
         implementation="reconstructed",
         enforce_hermitian_symmetry=True,
+        no_br=False,
         fixed_rank_modes=False,
         decomposition_kwargs: Optional[dict] = None,
         init_std="auto",
@@ -325,7 +338,8 @@ class SpectralConv(BaseSpectralConv):
         self.factorization = factorization
         self.implementation = implementation
         self.enforce_hermitian_symmetry = enforce_hermitian_symmetry
-        
+        self.no_br = no_br
+
         self.resolution_scaling_factor: Union[
             None, List[List[float]]
         ] = validate_scaling_factor(resolution_scaling_factor, self.order)
@@ -369,6 +383,9 @@ class SpectralConv(BaseSpectralConv):
         )
         self.weight.normal_(0, init_std)
 
+        if self.no_br:
+            self._apply_bitrev_permutation_to_weight()
+
         self._contract = get_contract_fun(
             self.weight, implementation=implementation, separable=separable
         )
@@ -379,6 +396,132 @@ class SpectralConv(BaseSpectralConv):
             )
         else:
             self.bias = None
+
+    # ------------------------------------------------------------------
+    # Bit-reversal-free helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bitrev_indices(n):
+        """Return the bit-reversal permutation for a sequence of length n (must be power-of-2)."""
+        bits = int(n).bit_length() - 1
+        indices = torch.arange(n, dtype=torch.long)
+        rev = torch.zeros_like(indices)
+        for i in range(bits):
+            rev = (rev << 1) | ((indices >> i) & 1)
+        return rev
+
+    def _apply_bitrev_permutation_to_weight(self):
+        """Permute the spectral weight tensor R in-place so that R̃[bitrev(k)] = R[k].
+
+        This one-time offline permutation makes butterfly-only FFT/IFFT (no bit-reversal)
+        produce the same spatial output as the standard FFT→R→IFFT path.
+        The weight axes that correspond to frequency modes start at index 1 (separable)
+        or index 2 (non-separable); each such axis is permuted independently.
+        """
+        # Reconstruct to a plain tensor for permutation, then write back
+        w = self.weight.to_tensor() if not torch.is_tensor(self.weight) else self.weight
+
+        # mode axes: after channel dim(s)
+        mode_start = 1 if self.separable else 2
+        for axis in range(mode_start, w.ndim):
+            n = w.shape[axis]
+            # Only power-of-2 sizes have a clean Cooley-Tukey bit-reversal.
+            # For non-power-of-2 we leave the axis unchanged (no-op).
+            if n > 0 and (n & (n - 1)) == 0:
+                # We need R̃[bitrev(k)] = R[k]
+                # This means R̃[j] = R[bitrev(j)]
+                perm = self._bitrev_indices(n)
+                w = torch.index_select(w, axis, perm)
+
+        # Write the permuted data back into the FactorizedTensor storage.
+        if torch.is_tensor(self.weight):
+            self.weight.data.copy_(w)
+        else:
+            try:
+                self.weight.data.copy_(w)
+            except AttributeError:
+                self.weight = nn.Parameter(w)
+
+    @staticmethod
+    def _fft_no_br(x, dim):
+        """1-D DIT FFT along `dim` using butterfly stages only -- no bit-reversal.
+
+        Produces X̃[k] = X[bitrev(k)], i.e. the standard DFT output in bit-reversed order.
+        """
+        n = x.shape[dim]
+        if n == 1:
+            return x
+        if n & (n - 1):
+            return torch.fft.fft(x, dim=dim)
+
+        # Bring the target dimension to the last position for easy slicing.
+        x = x.transpose(dim, -1)
+        *leading, length = x.shape
+        x = x.reshape(-1, length).to(torch.cfloat)
+
+        num_stages = int(n).bit_length() - 1
+        for stage in range(num_stages):
+            stage_len = 2**(stage + 1)
+            half = stage_len // 2
+            num_groups = n // stage_len
+
+            # twiddle factors: e^{-2πi k / stage_len} for k = 0..half-1
+            k = torch.arange(half, dtype=torch.float32, device=x.device)
+            twiddle = torch.exp(-2j * torch.pi * k / stage_len)
+
+            # reshape for vectorised butterfly
+            x = x.reshape(-1, num_groups, 2, half)
+            even = x[:, :, 0, :]
+            odd  = x[:, :, 1, :] * twiddle
+
+            x = torch.stack([even + odd, even - odd], dim=2)
+            x = x.reshape(-1, n)
+
+        x = x.reshape(*leading, length)
+        x = x.transpose(dim, -1)
+        return x
+
+    @staticmethod
+    def _ifft_no_br(x, dim, n=None):
+        """1-D DIF IFFT along `dim` using butterfly stages only -- no bit-reversal.
+        """
+        length = x.shape[dim]
+        if n is None:
+            n = length
+        if n == 1:
+            return x
+        if n & (n - 1):
+            return torch.fft.ifft(x, n=n, dim=dim)
+
+        x = x.transpose(dim, -1)
+        *leading, seq_len = x.shape
+        x = x.reshape(-1, seq_len).to(torch.cfloat)
+
+        num_stages = int(n).bit_length() - 1
+        for stage in range(num_stages):
+            stage_len = 2**(num_stages - stage)
+            half = stage_len // 2
+            num_groups = n // stage_len
+
+            k = torch.arange(half, dtype=torch.float32, device=x.device)
+            twiddle = torch.exp(2j * torch.pi * k / stage_len)
+
+            x = x.reshape(-1, num_groups, 2, half)
+            top = x[:, :, 0, :]
+            bot = x[:, :, 1, :]
+
+            x_top = top + bot
+            x_bot = (top - bot) * twiddle
+            x = torch.stack([x_top, x_bot], dim=2)
+            x = x.reshape(-1, n)
+
+        x = x / n
+        x = x.reshape(*leading, seq_len)
+        x = x.transpose(dim, -1)
+        return x
+
+    # ------------------------------------------------------------------
 
     def transform(self, x, output_shape=None):
         in_shape = list(x.shape[2:])
@@ -426,6 +569,12 @@ class SpectralConv(BaseSpectralConv):
         -------
         tensorized_spectral_conv(x)
         """
+        if self.no_br:
+            return self._forward_no_br(x, output_shape)
+        return self._forward_standard(x, output_shape)
+
+    def _forward_standard(self, x: torch.Tensor, output_shape: Optional[Tuple[int]] = None):
+        """Standard forward pass using torch.fft (includes bit-reversals internally)."""
         profiler = get_active_profiler()
         profile_prefix = getattr(self, "profile_prefix", None) or "spectral_conv"
 
@@ -454,8 +603,6 @@ class SpectralConv(BaseSpectralConv):
                 x = torch.fft.fftshift(x, dim=dims_to_fft_shift)
 
         if self.fno_block_precision == "mixed":
-            # if 'mixed', the above fft runs in full precision, but the
-            # following operations run at half precision
             x = x.chalf()
 
         if self.fno_block_precision in ["half", "mixed"]:
@@ -466,24 +613,20 @@ class SpectralConv(BaseSpectralConv):
             [batchsize, self.out_channels, *fft_size], device=x.device, dtype=out_dtype
         )
 
-        # if current modes are less than max, start indexing modes closer to the center of the weight tensor
         starts = [
             (max_modes - min(size, n_mode))
             for (size, n_mode, max_modes) in zip(fft_size, self.n_modes, self.max_n_modes)
         ]
-        # if contraction is separable, weights have shape (channels, modes_x, ...)
-        # otherwise they have shape (in_channels, out_channels, modes_x, ...)
         if self.separable:
-            slices_w = [slice(None)]  # channels
+            slices_w = [slice(None)]
         else:
-            slices_w = [slice(None), slice(None)]  # in_channels, out_channels
+            slices_w = [slice(None), slice(None)]
         if self.complex_data:
             slices_w += [
                 slice(start // 2, -start // 2) if start else slice(start, None)
                 for start in starts
             ]
         else:
-            # The last mode already has redundant half removed in real FFT
             slices_w += [
                 slice(start // 2, -start // 2) if start else slice(start, None)
                 for start in starts[:-1]
@@ -493,27 +636,17 @@ class SpectralConv(BaseSpectralConv):
         slices_w = tuple(slices_w)
         weight = self.weight[slices_w]
 
-        ### Pick the first n_modes modes of FFT signal along each dim
-
-        # if separable conv, weight tensor only has one channel dim
         if self.separable:
             weight_start_idx = 1
-        # otherwise drop first two dims (in_channels, out_channels)
         else:
             weight_start_idx = 2
 
-        slices_x = [slice(None), slice(None)]  # Batch_size, channels
+        slices_x = [slice(None), slice(None)]
 
         for all_modes, kept_modes in zip(fft_size, list(weight.shape[weight_start_idx:])):
-            # After fft-shift, the 0th frequency is located at n // 2 in each direction
-            # We select n_modes modes around the 0th frequency (kept at index n//2) by grabbing indices
-            # n//2 - n_modes//2  to  n//2 + n_modes//2       if n_modes is even
-            # n//2 - n_modes//2  to  n//2 + n_modes//2 + 1   if n_modes is odd
             center = all_modes // 2
             negative_freqs = kept_modes // 2
             positive_freqs = kept_modes // 2 + kept_modes % 2
-
-            # this slice represents the desired indices along each dim
             slices_x += [slice(center - negative_freqs, center + positive_freqs)]
 
         if weight.shape[-1] < fft_size[-1]:
@@ -529,51 +662,111 @@ class SpectralConv(BaseSpectralConv):
 
         if self.resolution_scaling_factor is not None and output_shape is None:
             mode_sizes = tuple([round(s * r) for (s, r) in zip(mode_sizes, self.resolution_scaling_factor)])
-
         if output_shape is not None:
             mode_sizes = output_shape
-
 
         if self.order > 1:
             with maybe_profile(profiler, f"{profile_prefix}/ifftshift", x.device):
                 out_fft = torch.fft.ifftshift(out_fft, dim=fft_dims[:-1])
-        
 
-        # Inverse FFT 
+        # Inverse FFT
         with maybe_profile(profiler, f"{profile_prefix}/ifft", x.device):
             if self.complex_data:
                 # For complex data, we can use ifftn.
                 x = torch.fft.ifftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
-            
             else:
-                # For real data, we need to enforce Hermitian symmetry conditions for irfft.
-                # On certain GPUs and for certain input sizes, this is not handled within irfftn in cuFFT, 
-                # and as a result causes line artifacts.  
-                # To fix this, we split the ifftn into a ifftn in (n-1) dimensions and a irfft in the last dimension,
-                # although it incurs a small additional computational cost.
-                
                 if self.enforce_hermitian_symmetry:
                     out_fft = torch.fft.ifftn(out_fft, s=mode_sizes[:-1], dim=fft_dims[:-1], norm=self.fft_norm)
-                    
-                    # Enforce Hermitian symmetry conditions for irfft
-                    # 0th frequency must be real
                     out_fft[..., 0].imag.zero_()
-                    
-                    # Nyquist frequency must be real if the spatial size is even
                     if mode_sizes[-1] % 2 == 0:
                         out_fft[..., -1].imag.zero_()
-                    
-                    # Now that the Hermitian symmetry conditions are enforced, we can use irfft on the last dimension.
                     x = torch.fft.irfft(out_fft, n=mode_sizes[-1], dim=fft_dims[-1], norm=self.fft_norm)
-                
                 else:
-                    
-                    # If Hemrmitian symmetry is not a concern, we can use irfftn on all dimensions.
                     x = torch.fft.irfftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
-            
 
         if self.bias is not None:
             with maybe_profile(profiler, f"{profile_prefix}/bias", x.device):
                 x = x + self.bias
-           
+        return x
+
+    def _forward_no_br(self, x: torch.Tensor, output_shape: Optional[Tuple[int]] = None):
+        """Bit-reversal-free forward pass using butterfly-only FFT/IFFT stages.
+
+        The DIT-FFT butterflies without bit-reversal produce X̃[k] = X[bitrev(k)].
+        The weight tensor R was pre-permuted at init as R̃[bitrev(k)] = R[k], so
+        contracting with R̃ in the bit-reversed layout is equivalent to contracting
+        with R in natural order. The DIF-IFFT butterflies without bit-reversal then
+        apply the same permutation on the way back, and P² = I means the two cancel:
+        the spatial output is identical to the standard path, W (skip) unchanged.
+
+        Only supports real spatial data (complex_data=False) and full precision.
+        For unsupported configurations falls back to the standard path.
+        """
+        if self.complex_data or self.fno_block_precision != "full":
+            return self._forward_standard(x, output_shape)
+
+        profiler = get_active_profiler()
+        profile_prefix = getattr(self, "profile_prefix", None) or "spectral_conv"
+
+        batchsize, channels, *mode_sizes = x.shape
+        fft_dims = list(range(-self.order, 0))
+
+        # --- FFT: butterfly stages only, no bit-reversal ---
+        with maybe_profile(profiler, f"{profile_prefix}/fft", x.device):
+            x = x.to(torch.cfloat)
+            for d in fft_dims:
+                x = self._fft_no_br(x, dim=d)
+
+        # The last dim has N//2+1 unique coefficients for real input in natural-order
+        # FFT; in bit-reversed order those same coefficients are at bit-reversed
+        # positions within the full-length output. We keep the full complex tensor
+        # here (no rfftn shortcut) so the index layout is consistent with the
+        # permuted weights. This means we use the full fft_size, not n//2+1.
+        fft_size = list(mode_sizes)  # full size on all dims (no rfft truncation)
+
+        out_dtype = torch.cfloat
+        out_fft = torch.zeros(
+            [batchsize, self.out_channels, *fft_size], device=x.device, dtype=out_dtype
+        )
+
+        # --- Weight contraction in bit-reversed frequency layout ---
+        starts = [
+            (max_modes - min(size, n_mode))
+            for (size, n_mode, max_modes) in zip(fft_size, self.n_modes, self.max_n_modes)
+        ]
+        if self.separable:
+            slices_w = [slice(None)]
+        else:
+            slices_w = [slice(None), slice(None)]
+        slices_w += [slice(None, -s) if s else slice(None) for s in starts]
+        slices_w = tuple(slices_w)
+        weight = self.weight[slices_w]
+
+        weight_start_idx = 1 if self.separable else 2
+        # In bit-reversed order the kept modes sit at indices 0..n_modes-1
+        slices_x = [slice(None), slice(None)]
+        for kept_modes in weight.shape[weight_start_idx:]:
+            slices_x += [slice(None, kept_modes)]
+        slices_x = tuple(slices_x)
+
+        with maybe_profile(profiler, f"{profile_prefix}/contract", x.device):
+            out_fft[slices_x] = self._contract(
+                x[slices_x], weight, separable=self.separable
+            )
+
+        if self.resolution_scaling_factor is not None and output_shape is None:
+            mode_sizes = tuple([round(s * r) for (s, r) in zip(mode_sizes, self.resolution_scaling_factor)])
+        if output_shape is not None:
+            mode_sizes = output_shape
+
+        # --- IFFT: butterfly stages only, no bit-reversal ---
+        with maybe_profile(profiler, f"{profile_prefix}/ifft", x.device):
+            y = out_fft
+            for d in fft_dims:
+                y = self._ifft_no_br(y, dim=d, n=mode_sizes[d])
+            x = y.real  # discard the negligible imaginary residual from float arithmetic
+
+        if self.bias is not None:
+            with maybe_profile(profiler, f"{profile_prefix}/bias", x.device):
+                x = x + self.bias
         return x

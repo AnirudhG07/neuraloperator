@@ -203,6 +203,7 @@ class FNO(BaseModel, name="FNO"):
         preactivation: bool = False,
         conv_module: nn.Module = SpectralConv,
         enforce_hermitian_symmetry: bool = True,
+        no_br: bool = False,
     ):
         if decomposition_kwargs is None:
             decomposition_kwargs = {}
@@ -237,6 +238,7 @@ class FNO(BaseModel, name="FNO"):
         self.preactivation = preactivation
         self.complex_data = complex_data
         self.fno_block_precision = fno_block_precision
+        self.no_br = no_br
 
         ## Positional embedding
         if positional_embedding == "grid":
@@ -309,6 +311,7 @@ class FNO(BaseModel, name="FNO"):
             conv_module=conv_module,
             n_layers=n_layers,
             enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+            no_br=no_br,
         )
 
         ## Lifting layer
