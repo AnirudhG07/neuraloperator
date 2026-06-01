@@ -9,7 +9,7 @@ from .complex import CGELU, ctanh, ComplexValued
 from .normalization_layers import AdaIN, InstanceNorm, BatchNorm
 from .skip_connections import skip_connection
 from .spectral_convolution import SpectralConv
-from ..utils import validate_scaling_factor
+from ..utils import validate_scaling_factor, get_active_profiler, maybe_profile
 
 
 Number = Union[int, float]
@@ -204,6 +204,8 @@ class FNOBlocks(nn.Module):
                 for i in range(n_layers)
             ]
         )
+        for i, conv in enumerate(self.convs):
+            setattr(conv, "profile_prefix", f"fno_blocks/{i}/spectral_conv")
 
         if fno_skip is not None:
             self.fno_skips = nn.ModuleList(
@@ -321,81 +323,114 @@ class FNOBlocks(nn.Module):
             return self.forward_with_postactivation(x, index, output_shape)
 
     def forward_with_postactivation(self, x, index=0, output_shape=None):
+        profiler = get_active_profiler()
+        prefix = f"fno_blocks/{index}"
+
         if self.fno_skips is not None:
-            x_skip_fno = self.fno_skips[index](x)
-            x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
+            with maybe_profile(profiler, f"{prefix}/fno_skip", x.device):
+                x_skip_fno = self.fno_skips[index](x)
+            with maybe_profile(profiler, f"{prefix}/fno_skip_transform", x.device):
+                x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
 
         if self.use_channel_mlp and self.channel_mlp_skips is not None:
-            x_skip_channel_mlp = self.channel_mlp_skips[index](x)
-            x_skip_channel_mlp = self.convs[index].transform(x_skip_channel_mlp, output_shape=output_shape)
+            with maybe_profile(profiler, f"{prefix}/channel_mlp_skip", x.device):
+                x_skip_channel_mlp = self.channel_mlp_skips[index](x)
+            with maybe_profile(profiler, f"{prefix}/channel_mlp_skip_transform", x.device):
+                x_skip_channel_mlp = self.convs[index].transform(x_skip_channel_mlp, output_shape=output_shape)
 
         if self.stabilizer == "tanh":
-            if self.complex_data:
-                x = ctanh(x)
-            else:
-                x = torch.tanh(x)
+            with maybe_profile(profiler, f"{prefix}/stabilizer", x.device):
+                if self.complex_data:
+                    x = ctanh(x)
+                else:
+                    x = torch.tanh(x)
 
         x_fno = self.convs[index](x, output_shape=output_shape)
 
         if self.norm is not None:
-            x_fno = self.norm[self.n_norms * index](x_fno)
+            with maybe_profile(profiler, f"{prefix}/norm_0", x.device):
+                x_fno = self.norm[self.n_norms * index](x_fno)
 
-        x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
+        with maybe_profile(profiler, f"{prefix}/fno_skip_add", x.device):
+            x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
 
         if index < (self.n_layers - 1):
-            x = self.non_linearity(x)
+            with maybe_profile(profiler, f"{prefix}/activation_0", x.device):
+                x = self.non_linearity(x)
 
         if self.use_channel_mlp:
             if self.channel_mlp_skips is not None:
-                x = self.channel_mlp[index](x) + x_skip_channel_mlp
+                with maybe_profile(profiler, f"{prefix}/channel_mlp", x.device):
+                    x = self.channel_mlp[index](x)
+                with maybe_profile(profiler, f"{prefix}/channel_mlp_skip_add", x.device):
+                    x = x + x_skip_channel_mlp
             else:
-                x = self.channel_mlp[index](x)
+                with maybe_profile(profiler, f"{prefix}/channel_mlp", x.device):
+                    x = self.channel_mlp[index](x)
 
         if self.norm is not None:
-            x = self.norm[self.n_norms * index + 1](x)
+            with maybe_profile(profiler, f"{prefix}/norm_1", x.device):
+                x = self.norm[self.n_norms * index + 1](x)
 
         if index < (self.n_layers - 1):
-            x = self.non_linearity(x)
+            with maybe_profile(profiler, f"{prefix}/activation_1", x.device):
+                x = self.non_linearity(x)
 
         return x
 
     def forward_with_preactivation(self, x, index=0, output_shape=None):
+        profiler = get_active_profiler()
+        prefix = f"fno_blocks/{index}"
         # Apply non-linear activation (and norm)
         # before this block's convolution/forward pass:
-        x = self.non_linearity(x)
-
-        if self.norm is not None:
-            x = self.norm[self.n_norms * index](x)
-
-        if self.fno_skips is not None:
-            x_skip_fno = self.fno_skips[index](x)
-            x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
-
-        if self.use_channel_mlp and self.channel_mlp_skips is not None:
-            x_skip_channel_mlp = self.channel_mlp_skips[index](x)
-            x_skip_channel_mlp = self.convs[index].transform(x_skip_channel_mlp, output_shape=output_shape)
-
-        if self.stabilizer == "tanh":
-            if self.complex_data:
-                x = ctanh(x)
-            else:
-                x = torch.tanh(x)
-
-        x_fno = self.convs[index](x, output_shape=output_shape)
-
-        x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
-
-        if index < (self.n_layers - 1):
+        with maybe_profile(profiler, f"{prefix}/activation_0", x.device):
             x = self.non_linearity(x)
 
         if self.norm is not None:
-            x = self.norm[self.n_norms * index + 1](x)
+            with maybe_profile(profiler, f"{prefix}/norm_0", x.device):
+                x = self.norm[self.n_norms * index](x)
+
+        if self.fno_skips is not None:
+            with maybe_profile(profiler, f"{prefix}/fno_skip", x.device):
+                x_skip_fno = self.fno_skips[index](x)
+            with maybe_profile(profiler, f"{prefix}/fno_skip_transform", x.device):
+                x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
+
+        if self.use_channel_mlp and self.channel_mlp_skips is not None:
+            with maybe_profile(profiler, f"{prefix}/channel_mlp_skip", x.device):
+                x_skip_channel_mlp = self.channel_mlp_skips[index](x)
+            with maybe_profile(profiler, f"{prefix}/channel_mlp_skip_transform", x.device):
+                x_skip_channel_mlp = self.convs[index].transform(x_skip_channel_mlp, output_shape=output_shape)
+
+        if self.stabilizer == "tanh":
+            with maybe_profile(profiler, f"{prefix}/stabilizer", x.device):
+                if self.complex_data:
+                    x = ctanh(x)
+                else:
+                    x = torch.tanh(x)
+
+        x_fno = self.convs[index](x, output_shape=output_shape)
+
+        with maybe_profile(profiler, f"{prefix}/fno_skip_add", x.device):
+            x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
+
+        if index < (self.n_layers - 1):
+            with maybe_profile(profiler, f"{prefix}/activation_1", x.device):
+                x = self.non_linearity(x)
+
+        if self.norm is not None:
+            with maybe_profile(profiler, f"{prefix}/norm_1", x.device):
+                x = self.norm[self.n_norms * index + 1](x)
 
         if self.use_channel_mlp:
             if self.channel_mlp_skips is not None:
-                x = self.channel_mlp[index](x) + x_skip_channel_mlp
+                with maybe_profile(profiler, f"{prefix}/channel_mlp", x.device):
+                    x = self.channel_mlp[index](x)
+                with maybe_profile(profiler, f"{prefix}/channel_mlp_skip_add", x.device):
+                    x = x + x_skip_channel_mlp
             else:
-                x = self.channel_mlp[index](x)
+                with maybe_profile(profiler, f"{prefix}/channel_mlp", x.device):
+                    x = self.channel_mlp[index](x)
 
         return x
 

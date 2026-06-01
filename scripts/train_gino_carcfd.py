@@ -6,6 +6,7 @@ dynamics data for car pressure prediction. The model learns to predict
 pressure fields from geometric inputs using graph-based representations.
 """
 
+from pathlib import Path
 import torch
 import wandb
 import sys
@@ -24,7 +25,8 @@ config_name = "cfd"
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.gino_carcfd_config import Default
 
 config = make_config_from_cli(Default)

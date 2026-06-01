@@ -6,6 +6,7 @@ equation with boundary conditions. The model learns to solve elliptic PDEs
 with complex geometries and boundary conditions using graph-based representations.
 """
 
+from pathlib import Path
 import sys
 
 import torch
@@ -30,7 +31,8 @@ config_name = "default"
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.poisson_gino_config import Default
 
 config = make_config_from_cli(Default)

@@ -83,6 +83,20 @@ of an equivalent, dense Fourier Neural Operator!
 To use W&B logging features, simply create a file in ``neuraloperator/config`` 
 called ``wandb_api_key.txt`` and paste your W&B API key there.
 
+=========
+Profiling
+=========
+
+To get a per-layer timing breakdown (FFT, contractions, skips, etc.) when training
+with ``Trainer``, enable the built-in timing profiler:
+
+.. code::
+
+  NEURALOP_TIMING=1 python scripts/train_darcy.py
+
+The report prints grouped and detailed timing tables at the end of training.
+Timing adds overhead and synchronizes CUDA operations for accuracy.
+
 
 ============
 Contributing

@@ -1,9 +1,8 @@
 """
-Training script for Burgers equation using standard neural operator training.
+Training script for Burgers equation using staged Fourier layers.
 
-This script trains a neural operator on the 1D time-dependent Burgers equation
-using the standard training approach with weighted loss functions and optional
-multi-grid patching for improved performance on high-resolution data.
+This script trains an FNO variant with per-layer Fourier mode counts, allowing
+later layers to use fewer modes (fewer parameters).
 """
 
 from pathlib import Path
@@ -21,13 +20,11 @@ from neuralop.utils import get_wandb_api_key, count_model_params, get_project_ro
 
 
 # Read the configuration
-config_name = "default"
 from zencfg import make_config_from_cli
-import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from config.burgers_config import Default
+from config.burgers_staged_config import Default
 
 
 config = make_config_from_cli(Default)
@@ -45,10 +42,9 @@ if config.wandb.log and is_logger:
         wandb_name = "_".join(
             f"{var}"
             for var in [
-                config_name,
                 config.model.model_arch,
-                config.model.n_layers,
-                config.model.n_modes,
+                config.model.n_layers if "n_layers" in config.model else len(config.model.n_modes_per_layer),
+                config.model.n_modes_per_layer[0],
                 config.model.hidden_channels,
             ]
         )

@@ -1,3 +1,4 @@
+from pathlib import Path
 import torch
 import time
 from tensorly import tenalg
@@ -11,7 +12,8 @@ from neuralop import get_model
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.test_config import TestConfig
 
 

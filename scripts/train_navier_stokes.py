@@ -26,7 +26,8 @@ config_name = "default"
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.navier_stokes_config import Default
 
 config = make_config_from_cli(Default)

@@ -16,8 +16,9 @@ dependencies = [
     "opt-einsum",
     "h5py",
     "zencfg>=0.3.0",
+    "the-well>=1.2.0",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 readme = "README.rst"
 license = {text = "MIT"}
 

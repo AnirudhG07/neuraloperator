@@ -1,4 +1,5 @@
 from .fno import TFNO, FNO
+from .fno_staged import FNOStaged
 
 # only import SFNO if torch_harmonics is built locally
 try:

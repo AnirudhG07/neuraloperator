@@ -19,6 +19,7 @@ from ..layers.padding import DomainPadding
 from ..layers.fno_block import FNOBlocks
 from ..layers.channel_mlp import ChannelMLP
 from ..layers.complex import ComplexValued
+from ..utils import get_active_profiler, maybe_profile
 from .base_model import BaseModel
 
 
@@ -380,22 +381,29 @@ class FNO(BaseModel, name="FNO"):
         elif isinstance(output_shape, tuple):
             output_shape = [None] * (self.n_layers - 1) + [output_shape]
 
+        profiler = get_active_profiler()
+
         # append spatial pos embedding if set
         if self.positional_embedding is not None:
-            x = self.positional_embedding(x)
+            with maybe_profile(profiler, "fno/positional_embedding", x.device):
+                x = self.positional_embedding(x)
 
-        x = self.lifting(x)
+        with maybe_profile(profiler, "fno/lifting", x.device):
+            x = self.lifting(x)
 
         if self.domain_padding is not None:
-            x = self.domain_padding.pad(x)
+            with maybe_profile(profiler, "fno/domain_padding/pad", x.device):
+                x = self.domain_padding.pad(x)
 
         for layer_idx in range(self.n_layers):
             x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
 
         if self.domain_padding is not None:
-            x = self.domain_padding.unpad(x)
+            with maybe_profile(profiler, "fno/domain_padding/unpad", x.device):
+                x = self.domain_padding.unpad(x)
 
-        x = self.projection(x)
+        with maybe_profile(profiler, "fno/projection", x.device):
+            x = self.projection(x)
 
         return x
 

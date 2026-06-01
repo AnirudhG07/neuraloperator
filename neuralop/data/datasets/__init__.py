@@ -11,7 +11,7 @@ from .car_ot_dataset import CarOTDataset, load_saved_ot, CFDDataProcessor
 # only import SphericalSWEDataset if torch_harmonics is built locally
 try:
     from .spherical_swe import load_spherical_swe
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     pass
 
 # only import TheWell if the_well is built

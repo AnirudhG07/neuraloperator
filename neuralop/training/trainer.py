@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Union
 import sys
 import warnings
+import os
 
 import torch
 from torch.cuda import amp
@@ -22,6 +23,7 @@ except ModuleNotFoundError:
 import neuralop.mpu.comm as comm
 from neuralop.losses import LpLoss
 from .training_state import load_training_state, save_training_state
+from neuralop.utils import TimingProfiler, profiling, get_active_profiler, maybe_profile
 
 
 class Trainer:
@@ -52,6 +54,14 @@ class Trainer:
     use_distributed : bool, default is False
         whether to use DDP
     verbose : bool, default is False
+    timing_profiler : TimingProfiler, optional
+        if provided, collects timing statistics during training
+    timing_report_interval : int, optional
+        if provided, prints timing summary every N epochs; otherwise prints once at the end
+    timing_report_group_depth : int, default is 3
+        number of path segments to group when printing timing summaries
+    timing_report_sort : str, default is "name"
+        sort order for timing report: "name" or "total"
     """
 
     def __init__(
@@ -67,6 +77,10 @@ class Trainer:
         log_output: bool = False,
         use_distributed: bool = False,
         verbose: bool = False,
+        timing_profiler: TimingProfiler = None,
+        timing_report_interval: int = None,
+        timing_report_group_depth: int = 3,
+        timing_report_sort: str = "name",
     ):
         """ """
 
@@ -91,6 +105,19 @@ class Trainer:
                 self.autocast_device_type = "cpu"
         self.mixed_precision = mixed_precision
         self.data_processor = data_processor
+        self.timing_profiler = timing_profiler
+        self.timing_report_interval = timing_report_interval
+        self.timing_report_group_depth = timing_report_group_depth
+        self.timing_report_sort = timing_report_sort
+        self.timing_report_per_batch = False
+
+        if self.timing_profiler is None:
+            timing_env = os.getenv("NEURALOP_TIMING", "").strip().lower()
+            if timing_env in {"1", "true", "yes", "on"}:
+                self.timing_profiler = TimingProfiler()
+        timing_batch_env = os.getenv("NEURALOP_TIMING_PER_BATCH", "").strip().lower()
+        if timing_batch_env in {"1", "true", "yes", "on"}:
+            self.timing_report_per_batch = True
 
         # Track starting epoch for checkpointing/resuming
         self.start_epoch = 0
@@ -293,16 +320,86 @@ class Trainer:
         # track number of training examples in batch
         self.n_samples = 0
 
-        for idx, sample in enumerate(train_loader):
-            loss = self.train_one_batch(idx, sample, training_loss)
-            loss.backward()
-            self.optimizer.step()
+        if self.timing_profiler is not None and self.timing_report_per_batch:
+            for idx, sample in enumerate(train_loader):
+                self.timing_profiler.reset()
+                with profiling(self.timing_profiler):
+                    loss = self.train_one_batch(idx, sample, training_loss)
+                    profiler = get_active_profiler()
+                    loss_device = loss.device if isinstance(loss, torch.Tensor) else None
+                    with maybe_profile(profiler, "train/backward", loss_device):
+                        loss.backward()
+                    with maybe_profile(profiler, "train/optimizer_step", loss_device):
+                        self.optimizer.step()
 
-            train_err += loss.item()
-            with torch.no_grad():
-                avg_loss += loss.item()
-                if self.regularizer:
-                    avg_lasso_loss += self.regularizer.loss
+                train_err += loss.item()
+                with torch.no_grad():
+                    avg_loss += loss.item()
+                    if self.regularizer:
+                        avg_lasso_loss += self.regularizer.loss
+
+                if self.verbose:
+                    title = f"Timing report (epoch {epoch} batch {idx})"
+                    print(
+                        self.timing_profiler.summary(
+                            title=f"{title} [grouped]",
+                            sort_by=self.timing_report_sort,
+                            group_depth=self.timing_report_group_depth,
+                        )
+                    )
+                    print(
+                        self.timing_profiler.summary(
+                            title=f"{title} [detailed]",
+                            sort_by=self.timing_report_sort,
+                            group_depth=None,
+                        )
+                    )
+                    print(
+                        self.timing_profiler.simple_summary(
+                            title=f"{title} [simple]",
+                            top_k=3,
+                            group_depth=self.timing_report_group_depth,
+                        )
+                    )
+                    sys.stdout.flush()
+        else:
+            if self.timing_profiler is not None:
+                self.timing_profiler.reset()
+                timing_context = profiling(self.timing_profiler)
+            else:
+                timing_context = None
+
+            if timing_context is not None:
+                with timing_context:
+                    for idx, sample in enumerate(train_loader):
+                        loss = self.train_one_batch(idx, sample, training_loss)
+                        profiler = get_active_profiler()
+                        loss_device = loss.device if isinstance(loss, torch.Tensor) else None
+                        with maybe_profile(profiler, "train/backward", loss_device):
+                            loss.backward()
+                        with maybe_profile(profiler, "train/optimizer_step", loss_device):
+                            self.optimizer.step()
+
+                        train_err += loss.item()
+                        with torch.no_grad():
+                            avg_loss += loss.item()
+                            if self.regularizer:
+                                avg_lasso_loss += self.regularizer.loss
+            else:
+                for idx, sample in enumerate(train_loader):
+                    loss = self.train_one_batch(idx, sample, training_loss)
+                    profiler = get_active_profiler()
+                    loss_device = loss.device if isinstance(loss, torch.Tensor) else None
+                    with maybe_profile(profiler, "train/backward", loss_device):
+                        loss.backward()
+                    with maybe_profile(profiler, "train/optimizer_step", loss_device):
+                        self.optimizer.step()
+
+                    train_err += loss.item()
+                    with torch.no_grad():
+                        avg_loss += loss.item()
+                        if self.regularizer:
+                            avg_lasso_loss += self.regularizer.loss
 
         if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             self.scheduler.step(train_err)
@@ -330,6 +427,51 @@ class Trainer:
                 avg_lasso_loss=avg_lasso_loss,
                 lr=lr,
             )
+        if self.timing_profiler is not None and self.verbose and not self.timing_report_per_batch:
+            if self.timing_report_interval is None:
+                report_now = epoch == (self.n_epochs - 1)
+            else:
+                report_now = epoch % self.timing_report_interval == 0
+            if report_now:
+                title = f"Timing report (epoch {epoch})"
+                if self.timing_report_group_depth is not None:
+                    print(
+                        self.timing_profiler.summary(
+                            title=f"{title} [grouped]",
+                            sort_by=self.timing_report_sort,
+                            group_depth=self.timing_report_group_depth,
+                        )
+                    )
+                    print(
+                        self.timing_profiler.summary(
+                            title=f"{title} [detailed]",
+                            sort_by=self.timing_report_sort,
+                            group_depth=None,
+                        )
+                    )
+                    print(
+                        self.timing_profiler.simple_summary(
+                            title=f"{title} [simple]",
+                            top_k=3,
+                            group_depth=self.timing_report_group_depth,
+                        )
+                    )
+                else:
+                    print(
+                        self.timing_profiler.summary(
+                            title=title,
+                            sort_by=self.timing_report_sort,
+                            group_depth=None,
+                        )
+                    )
+                    print(
+                        self.timing_profiler.simple_summary(
+                            title=f"{title} [simple]",
+                            top_k=3,
+                            group_depth=None,
+                        )
+                    )
+                sys.stdout.flush()
 
         return train_err, avg_loss, avg_lasso_loss, epoch_train_time
 
@@ -501,42 +643,58 @@ class Trainer:
             float value of training loss
         """
 
+        profiler = get_active_profiler()
+
         self.optimizer.zero_grad(set_to_none=True)
         if self.regularizer:
             self.regularizer.reset()
         if self.data_processor is not None:
-            sample = self.data_processor.preprocess(sample)
+            with maybe_profile(profiler, "train/preprocess", None):
+                sample = self.data_processor.preprocess(sample)
         else:
             # load data to device if no preprocessor exists
-            sample = {k: v.to(self.device) for k, v in sample.items() if torch.is_tensor(v)}
+            with maybe_profile(profiler, "train/to_device", None):
+                sample = {
+                    k: v.to(self.device) for k, v in sample.items() if torch.is_tensor(v)
+                }
 
         if isinstance(sample["y"], torch.Tensor):
             self.n_samples += sample["y"].shape[0]
         else:
             self.n_samples += 1
 
+        forward_device = None
+        if isinstance(sample.get("y"), torch.Tensor):
+            forward_device = sample["y"].device
         if self.mixed_precision:
-            with torch.autocast(device_type=self.autocast_device_type):
-                out = self.model(**sample)
+            with maybe_profile(profiler, "train/forward", forward_device):
+                with torch.autocast(device_type=self.autocast_device_type):
+                    out = self.model(**sample)
         else:
-            out = self.model(**sample)
+            with maybe_profile(profiler, "train/forward", forward_device):
+                out = self.model(**sample)
         
         if self.epoch == 0 and idx == 0 and self.verbose and isinstance(out, torch.Tensor):
             print(f"Raw outputs of shape {out.shape}")
 
         if self.data_processor is not None:
-            out, sample = self.data_processor.postprocess(out, sample)
+            with maybe_profile(profiler, "train/postprocess", None):
+                out, sample = self.data_processor.postprocess(out, sample)
 
         loss = 0.0
 
+        loss_device = out.device if isinstance(out, torch.Tensor) else forward_device
         if self.mixed_precision:
-            with torch.autocast(device_type=self.autocast_device_type):
-                loss += training_loss(out, **sample)
+            with maybe_profile(profiler, "train/loss", loss_device):
+                with torch.autocast(device_type=self.autocast_device_type):
+                    loss += training_loss(out, **sample)
         else:
-            loss += training_loss(out, **sample)
+            with maybe_profile(profiler, "train/loss", loss_device):
+                loss += training_loss(out, **sample)
 
         if self.regularizer:
-            loss += self.regularizer.loss
+            with maybe_profile(profiler, "train/regularizer", loss_device):
+                loss += self.regularizer.loss
 
         return loss
 

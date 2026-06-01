@@ -26,7 +26,8 @@ from neuralop.utils import get_wandb_api_key, count_model_params
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.darcy_config import Default
 
 

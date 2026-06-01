@@ -6,6 +6,7 @@ using physics-informed loss functions and advanced loss aggregation methods.
 The script supports both Relobralo and SoftAdapt loss aggregation strategies.
 """
 
+from pathlib import Path
 import sys
 import torch
 import wandb
@@ -22,7 +23,8 @@ config_name = "default"
 from zencfg import make_config_from_cli
 import sys
 
-sys.path.insert(0, "../")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from config.burgers_pino_config import Default
 
 config = make_config_from_cli(Default)

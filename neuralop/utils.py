@@ -1,6 +1,9 @@
 from typing import List, Optional, Union
 from math import prod
 from pathlib import Path
+from contextlib import contextmanager, nullcontext
+import contextvars
+import time
 import torch
 
 # Only import wandb and use if installed
@@ -224,3 +227,140 @@ def compute_explained_variance(frequency_max, s):
 def get_project_root():
     root = Path(__file__).parent.parent
     return root
+
+
+_ACTIVE_PROFILER = contextvars.ContextVar("neuralop_active_profiler", default=None)
+
+
+class TimingStat:
+    def __init__(self):
+        self.total_s = 0.0
+        self.count = 0
+
+    def update(self, duration_s: float):
+        self.total_s += duration_s
+        self.count += 1
+
+
+class TimingProfiler:
+    def __init__(self):
+        self._stats = {}
+
+    def reset(self):
+        self._stats = {}
+
+    def record(self, name: str, duration_s: float):
+        if name not in self._stats:
+            self._stats[name] = TimingStat()
+        self._stats[name].update(duration_s)
+
+    def section(self, name: str, device: Optional[torch.device] = None):
+        return _TimingSection(self, name, device)
+
+    def summary(self, title: Optional[str] = None, sort_by: str = "total", group_depth: Optional[int] = None):
+        if group_depth is not None:
+            stats = self._group_stats(group_depth)
+        else:
+            stats = self._stats
+
+        total_s = sum(stat.total_s for stat in stats.values())
+        items = list(stats.items())
+        if sort_by == "name":
+            items.sort(key=lambda item: item[0])
+        else:
+            items.sort(key=lambda item: item[1].total_s, reverse=True)
+
+        lines = []
+        if title:
+            lines.append(title)
+        header = "section | total(s) | avg(ms) | pct | count"
+        lines.append(header)
+        lines.append("-" * len(header))
+        for name, stat in items:
+            avg_ms = (stat.total_s / stat.count * 1000.0) if stat.count else 0.0
+            pct = (stat.total_s / total_s * 100.0) if total_s else 0.0
+            lines.append(
+                f"{name} | {stat.total_s:.4f} | {avg_ms:.3f} | {pct:5.1f}% | {stat.count}"
+            )
+        return "\n".join(lines)
+
+    def simple_summary(self, title: Optional[str] = None, top_k: int = 3, group_depth: Optional[int] = None):
+        if group_depth is not None:
+            stats = self._group_stats(group_depth)
+        else:
+            stats = self._stats
+
+        total_s = sum(stat.total_s for stat in stats.values())
+        items = sorted(stats.items(), key=lambda item: item[1].total_s, reverse=True)
+
+        lines = []
+        if title:
+            lines.append(title)
+        if not items or total_s == 0.0:
+            lines.append("No timing data collected.")
+            return "\n".join(lines)
+
+        lines.append("Kid summary:")
+        for name, stat in items[:top_k]:
+            pct = (stat.total_s / total_s * 100.0) if total_s else 0.0
+            lines.append(f"- {name} is a big eater: {pct:.1f}% of the measured time.")
+        return "\n".join(lines)
+
+    def _group_stats(self, group_depth: int):
+        grouped = {}
+        for name, stat in self._stats.items():
+            parts = name.split("/")
+            key = "/".join(parts[:group_depth]) if len(parts) >= group_depth else name
+            if key not in grouped:
+                grouped[key] = TimingStat()
+            grouped[key].total_s += stat.total_s
+            grouped[key].count += stat.count
+        return grouped
+
+
+class _TimingSection:
+    def __init__(self, profiler: TimingProfiler, name: str, device: Optional[torch.device]):
+        self._profiler = profiler
+        self._name = name
+        self._device = device
+        self._start_time = None
+        self._start_event = None
+        self._end_event = None
+
+    def __enter__(self):
+        if self._device is not None and self._device.type == "cuda":
+            self._start_event = torch.cuda.Event(enable_timing=True)
+            self._end_event = torch.cuda.Event(enable_timing=True)
+            self._start_event.record()
+        else:
+            self._start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._start_event is not None:
+            self._end_event.record()
+            self._end_event.synchronize()
+            duration_s = self._start_event.elapsed_time(self._end_event) / 1000.0
+        else:
+            duration_s = time.perf_counter() - self._start_time
+        self._profiler.record(self._name, duration_s)
+        return False
+
+
+@contextmanager
+def profiling(profiler: TimingProfiler):
+    token = _ACTIVE_PROFILER.set(profiler)
+    try:
+        yield profiler
+    finally:
+        _ACTIVE_PROFILER.reset(token)
+
+
+def get_active_profiler() -> Optional[TimingProfiler]:
+    return _ACTIVE_PROFILER.get()
+
+
+def maybe_profile(profiler: Optional[TimingProfiler], name: str, device: Optional[torch.device] = None):
+    if profiler is None:
+        return nullcontext()
+    return profiler.section(name, device)

@@ -9,6 +9,7 @@ class ModelConfig(ConfigBase):
 
 
 class FNOConfig(ModelConfig):
+    arch: str = "fno"
     model_arch: str = "fno"
     data_channels: int
     out_channels: int
@@ -29,6 +30,31 @@ class FNOConfig(ModelConfig):
     rank: float = 1.0
     fixed_rank_modes: bool = False
     stabilizer: str = "None"
+
+
+class FNOStagedConfig(ModelConfig):
+    arch: str = "fno_staged"
+    model_arch: str = "fno_staged"
+    data_channels: int
+    out_channels: int
+    n_modes_per_layer: List[List[int]]
+    hidden_channels: int
+    max_n_modes_per_layer: Optional[List[List[int]]] = None
+    lifting_channel_ratio: int = 2
+    projection_channel_ratio: int = 4
+    domain_padding: float = 0.0
+    norm: str = "None"
+    fno_skip: str = "linear"
+    implementation: str = "factorized"
+    use_channel_mlp: bool = True
+    channel_mlp_expansion: float = 0.5
+    channel_mlp_dropout: float = 0
+    separable: bool = False
+    factorization: str = "None"
+    rank: float = 1.0
+    fixed_rank_modes: bool = False
+    stabilizer: str = "None"
+    preactivation: bool = False
 
 
 class SimpleFNOConfig(FNOConfig):
