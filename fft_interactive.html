@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cooley-Tukey FFT — Universal Calculator</title>
+<style>
+:root {
+    --bg-body:#f8fafc;--bg-card:#ffffff;--bg-primary:#f1f5f9;
+    --text-primary:#1e293b;--text-secondary:#475569;--text-tertiary:#94a3b8;
+    --border-primary:#e2e8f0;--border-secondary:#cbd5e1;
+    --accent-blue:#3b82f6;--accent-teal:#14b8a6;--accent-orange:#f59e0b;--accent-red:#ef4444;
+    --shadow-sm:0 1px 2px 0 rgb(0 0 0/0.05);
+    --font-sans:'Inter',system-ui,-apple-system,sans-serif;
+    --font-mono:'JetBrains Mono','Fira Code',monospace;
+}
+@media(prefers-color-scheme:dark){:root{
+    --bg-body:#0f172a;--bg-card:#1e293b;--bg-primary:#0f172a;
+    --text-primary:#f1f5f9;--text-secondary:#94a3b8;--text-tertiary:#64748b;
+    --border-primary:#334155;--border-secondary:#475569;
+}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);color:var(--text-primary);background:var(--bg-body);line-height:1.5;padding:2rem 1rem;background-image:radial-gradient(var(--border-primary) 0.5px,transparent 0.5px);background-size:24px 24px;}
+.container{max-width:1100px;margin:0 auto}
+header{text-align:center;margin-bottom:2rem}
+h2{font-size:2rem;font-weight:700;letter-spacing:-0.025em;margin-bottom:0.5rem}
+.subtitle{color:var(--text-secondary)}
+.tabs-container{position:sticky;top:0;background:var(--bg-body);padding-top:1rem;z-index:100;margin-bottom:2rem}
+.tabs{display:flex;gap:0.5rem;border-bottom:1px solid var(--border-primary);overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:0.75rem 1.25rem;font-size:0.875rem;font-weight:500;border:none;background:transparent;cursor:pointer;color:var(--text-secondary);border-bottom:2px solid transparent;white-space:nowrap;transition:all 0.2s}
+.tab.active{color:var(--accent-blue);border-bottom-color:var(--accent-blue)}
+.tab:hover:not(.active){color:var(--text-primary);background:var(--bg-primary);border-radius:0.5rem 0.5rem 0 0}
+.panel{display:none}.panel.active{display:block;animation:fadeIn 0.3s ease-out}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.card{background:var(--bg-card);border:1px solid var(--border-primary);border-radius:1rem;padding:1.5rem;margin-bottom:1.5rem;box-shadow:var(--shadow-sm)}
+.section-label{font-size:0.75rem;font-weight:700;color:var(--accent-blue);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1rem;display:block}
+.math-block{background:var(--bg-primary);border-radius:0.75rem;padding:1.25rem;font-family:var(--font-mono);font-size:0.9375rem;margin:1rem 0;overflow-x:auto;line-height:2}
+sup{font-size:0.7em;vertical-align:super}sub{font-size:0.7em;vertical-align:sub}
+.highlight{color:var(--accent-orange);font-weight:600}.highlight-blue{color:var(--accent-blue);font-weight:600}.highlight-teal{color:var(--accent-teal);font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:0.875rem;margin:1rem 0}
+th,td{padding:0.75rem 1rem;text-align:left;border-bottom:1px solid var(--border-primary)}
+th{color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase}
+td.mono{font-family:var(--font-mono)}
+.input-area{display:flex;flex-direction:column;gap:0.75rem;margin-bottom:1.5rem}
+.input-area textarea{width:100%;padding:1rem;border:1px solid var(--border-primary);border-radius:0.75rem;font-family:var(--font-mono);font-size:0.9rem;background:var(--bg-primary);color:var(--text-primary);resize:vertical;min-height:80px}
+.input-info{font-size:0.75rem;color:var(--text-tertiary);display:flex;justify-content:space-between}
+.controls-row{display:flex;gap:0.75rem;margin-bottom:1.5rem;flex-wrap:wrap;align-items:center}
+.stbtn{padding:0.5rem 1rem;font-size:0.8125rem;font-weight:600;border:1px solid var(--border-primary);border-radius:0.5rem;background:var(--bg-card);cursor:pointer;color:var(--text-primary);transition:all 0.2s}
+.stbtn.active{background:var(--accent-blue);color:white;border-color:var(--accent-blue)}
+.stbtn.accent{border-color:var(--accent-orange);color:var(--accent-orange)}
+.stbtn.accent.active{background:var(--accent-orange);color:white}
+.bin-grid{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px}
+.bin-btn{padding:4px 8px;font-size:10px;font-weight:700;border:1px solid var(--border-primary);border-radius:4px;background:var(--bg-card);cursor:pointer;color:var(--text-secondary)}
+.bin-btn.active{background:var(--accent-orange);color:white;border-color:var(--accent-orange)}
+.svg-scroll-container{background:var(--bg-primary);border-radius:1rem;border:1px solid var(--border-primary);max-height:600px;overflow:auto;position:relative;padding:1rem}
+svg{display:block}
+.net-scroll{background:var(--bg-primary);border-radius:1rem;border:1px solid var(--border-primary);overflow:auto;position:relative;padding:1rem}
+.net-canvas{position:relative}
+.net-box{position:absolute;border-radius:10px;border:1.5px solid;background:var(--bg-card);box-shadow:var(--shadow-sm)}
+.net-box.red{background:#FCEBEB;border-color:#E24B4A}
+.net-box.green{background:#E1F5EE;border-color:#1D9E75}
+.net-box.purple{background:#EEEDFE;border-color:#7F77DD}
+.net-box.orange{background:#FAEEDA;border-color:#BA7517}
+.net-box.blue{background:#DAE8FC;border-color:#6C8EBF}
+.net-box.sram{background:#FFF7ED;border-color:#EA580C;border-width:2px}
+.net-label{position:absolute;text-align:center;font-size:11px;font-weight:600;color:var(--text-primary);line-height:1.3;pointer-events:none}
+.net-io-label{position:absolute;font-family:var(--font-mono);font-size:10px;color:var(--text-secondary);pointer-events:none}
+.net-val{position:absolute;font-family:var(--font-mono);font-size:10px;color:var(--text-primary);padding:0 2px;background:var(--bg-card);border-radius:4px;opacity:0.9;white-space:nowrap;pointer-events:none}
+.val-label,.io-label{fill:white;font-weight:800;paint-order:stroke;stroke:rgba(15,23,42,0.9);stroke-width:3px;stroke-linecap:round;stroke-linejoin:round}
+.val-label{font-size:10px}.io-label{font-size:11px}
+.result-box{font-size:0.875rem;color:var(--text-secondary);padding:1.25rem;border-radius:0.75rem;background:var(--bg-primary);font-family:var(--font-mono);line-height:1.7;white-space:pre-wrap}
+.calc-step{border-left:2px solid var(--accent-orange);padding-left:1rem;margin-top:1rem}
+.bit-row{display:flex;flex-wrap:wrap;gap:0.5rem;margin:1.5rem 0}
+.bit-box{display:flex;flex-direction:column;align-items:center;gap:0.25rem;padding:0.5rem;background:var(--bg-primary);border-radius:0.5rem;min-width:60px}
+.bit-box .idx{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:0.4rem;font-weight:700;background:var(--accent-blue);color:white;font-size:12px}
+
+/* Trace table styles */
+.trace-table{width:100%;border-collapse:collapse;font-size:0.8rem;margin:0.5rem 0}
+.trace-table th{background:var(--bg-primary);color:var(--text-secondary);font-weight:600;font-size:0.7rem;text-transform:uppercase;padding:6px 8px;border:1px solid var(--border-primary);text-align:center}
+.trace-table td{padding:5px 8px;border:1px solid var(--border-primary);font-family:var(--font-mono);font-size:0.75rem;text-align:center}
+.trace-table tr.pass-header td{background:var(--accent-blue);color:white;font-weight:700;font-size:0.75rem;text-align:left;font-family:var(--font-sans)}
+.trace-table tr.stage-row td{background:var(--bg-card)}
+.trace-table tr.stage-row:nth-child(even) td{background:var(--bg-primary)}
+.trace-table tr.shuffle-row td{background:#EEEDFE;color:#3C3489;font-style:italic}
+.trace-table tr.sram-row td{background:#FFF7ED;color:#C2410C;font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:700}
+.badge-green{background:#D1FAE5;color:#065F46}
+.badge-orange{background:#FEF3C7;color:#92400E}
+.badge-purple{background:#EDE9FE;color:#4C1D95}
+.badge-red{background:#FEE2E2;color:#991B1B}
+.badge-blue{background:#DBEAFE;color:#1E40AF}
+.arch-note{background:var(--bg-primary);border-left:3px solid var(--accent-blue);border-radius:0 8px 8px 0;padding:12px 16px;margin:12px 0;font-size:0.85rem;color:var(--text-secondary);line-height:1.6}
+.arch-note b{color:var(--text-primary)}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+    <h2>Cooley-Tukey FFT</h2>
+    <p class="subtitle">Universal Butterfly Visualizer — any N ≤ 64</p>
+</header>
+<div class="tabs-container">
+    <div class="tabs">
+        <button class="tab active" onclick="showTab(0)">① Theory</button>
+        <button class="tab" onclick="showTab(1)">② Decimation</button>
+        <button class="tab" onclick="showTab(2)">③ Butterfly</button>
+        <button class="tab" onclick="showTab(3)">④ Bit Reversal</button>
+        <button class="tab" onclick="showTab(4)">⑤ Trace & Calculator</button>
+        <button class="tab" onclick="showTab(5)">⑥ 3× PE-A (loop-back)</button>
+        <button class="tab" onclick="showTab(6)">⑦ PE-A + PE-B (loop-back)</button>
+    </div>
+</div>
+
+<!-- TAB 0 -->
+<div class="panel active" id="tab0">
+    <div class="card">
+        <span class="section-label">The Core Concept</span>
+        <p style="margin-bottom:1rem">The DFT converts a signal from time domain to frequency domain:</p>
+        <div class="math-block"><span class="highlight-blue">X[k]</span> = <span style="font-size:1.5rem;vertical-align:middle">∑</span><sub>n=0</sub><sup>N-1</sup> &nbsp;<span class="highlight">x[n]</span> · e<sup>−j(2π/N)nk</sup></div>
+        <p style="font-size:0.875rem;color:var(--text-secondary);line-height:1.6">Computing directly is <strong>O(N²)</strong>. For N=1024 that's over 1 million complex multiplications. FFT reduces this to <strong>O(N log N)</strong> — about 5,000 operations — by recursively exploiting mathematical symmetry.</p>
+    </div>
+    <div class="card">
+        <span class="section-label">Why Power of Two?</span>
+        <p style="font-size:0.875rem;color:var(--text-secondary);line-height:1.6">The Radix-2 algorithm requires N to be a power of two. If your signal has 10 samples, you zero-pad to N=16. Mixed-radix or Bluestein's algorithm handles arbitrary N.</p>
+    </div>
+</div>
+
+<!-- TAB 1 -->
+<div class="panel" id="tab1">
+    <div class="card">
+        <span class="section-label">Decimation in Time (DIT)</span>
+        <div class="math-block">X[k] = <span class="highlight-teal">E[k]</span> + W<sub>N</sub><sup>k</sup>·<span style="color:var(--accent-red);font-weight:600">O[k]</span></div>
+        <p style="font-size:0.875rem;color:var(--text-secondary);line-height:1.6;margin-top:1rem"><strong>Periodicity Trick:</strong> W<sub>N</sub><sup>k+N/2</sup> = −W<sub>N</sub><sup>k</sup>, so X[k+N/2] = E[k] − W<sub>N</sub><sup>k</sup>·O[k]. Both outputs from one multiply.</p>
+    </div>
+</div>
+
+<!-- TAB 2 -->
+<div class="panel" id="tab2">
+    <div class="card">
+        <span class="section-label">The Butterfly Unit</span>
+        <div class="math-block">t = W<sub>N</sub><sup>k</sup> · b<br>out<sub>top</sub> = a + t<br>out<sub>bot</sub> = a − t</div>
+    </div>
+    <div class="card">
+        <span class="section-label">Real Hardware Cost</span>
+        <table><thead><tr><th>Operation</th><th>Formula</th><th>Real ops</th></tr></thead><tbody>
+        <tr><td>Complex multiply t=W·b</td><td class="mono">(Wr+jWi)(br+jbi)</td><td>4 muls, 2 adds</td></tr>
+        <tr><td>Complex add (a+t)</td><td class="mono">ar+tr, ai+ti</td><td>2 adds</td></tr>
+        <tr><td>Complex sub (a−t)</td><td class="mono">ar−tr, ai−ti</td><td>2 subs</td></tr>
+        <tr><td><strong>Total</strong></td><td></td><td><strong>4 mul + 6 add</strong></td></tr>
+        </tbody></table>
+    </div>
+</div>
+
+<!-- TAB 3 -->
+<div class="panel" id="tab3">
+    <div class="card">
+        <span class="section-label">Bit-Reversal Mapping (Current N)</span>
+        <div id="bitrev-info" style="font-size:0.8rem;margin-bottom:1rem">Enter a signal in Tab 5 to see mapping.</div>
+        <div class="bit-row" id="bitrev-row"></div>
+    </div>
+</div>
+
+<!-- TAB 4 -->
+<div class="panel" id="tab4">
+    <div class="card">
+        <span class="section-label">Input Signal (x[n])</span>
+        <div class="input-area">
+            <textarea id="raw-input" class="input-shared" placeholder="Enter values (e.g. 1,2,3,4,5,6,7,8)" oninput="onInputChange(this)">1, 2, 3, 4, 5, 6, 7, 8</textarea>
+            <div class="input-info"><span id="len-info">Length: 8</span><span id="pad-info" class="highlight">N: 8</span></div>
+        </div>
+        <div class="controls-row">
+            <div style="display:flex;flex-direction:column;gap:4px">
+                <span style="font-size:10px;font-weight:700;color:var(--text-tertiary)">VIEW MODE</span>
+                <div style="display:flex;gap:4px">
+                    <button class="stbtn active" id="mode-all" onclick="setTraceView('all',this)">Overview</button>
+                    <button class="stbtn accent" id="mode-trace" onclick="setTraceView('trace',this)">Deep Trace Bin</button>
+                </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+                <span style="font-size:10px;font-weight:700;color:var(--text-tertiary)">ACTIVE STAGE</span>
+                <div id="stage-btn-container" style="display:flex;gap:4px"></div>
+            </div>
+            <div id="bin-btns" style="display:none;flex-direction:column;gap:4px">
+                <span style="font-size:10px;font-weight:700;color:var(--text-tertiary)">TARGET BIN</span>
+                <div id="bin-btn-container" class="bin-grid"></div>
+            </div>
+        </div>
+        <div class="svg-scroll-container"><svg id="fft-svg"></svg></div>
+    </div>
+    <div class="card">
+        <span class="section-label">Live Calculation Details</span>
+        <div class="result-box" id="trace-result">Calculations will appear here...</div>
+    </div>
+</div>
+
+<!-- TAB 5: 3× PE-A LOOP-BACK -->
+<div class="panel" id="tab5">
+    <div class="card">
+        <span class="section-label">3× Identical PE-A — Hardware Loop-Back Architecture</span>
+        <div class="input-area">
+            <textarea class="input-shared" placeholder="e.g. 1,2,3,4,5,6,7,8" oninput="onInputChange(this)">1, 2, 3, 4, 5, 6, 7, 8</textarea>
+            <div class="input-info"><span id="pass-info-a">Length: 8</span><span id="pass-pad-a" class="highlight">N: 8</span></div>
+        </div>
+        <div class="arch-note" id="arch-note-a">
+            <b>How this hardware works:</b> There is <b>one physical PE-A block</b> and <b>one SRAM bank pair</b> (ping-pong). Data loops back from the PE-A output into the SRAM, and gets read again on the next pass with a shuffled address. The loop runs ⌈log₂N / 2⌉ times. Only <code>W_base</code> register changes between loops.
+        </div>
+        <div class="controls-row" style="margin-top:1rem; margin-bottom: 0;">
+            <div style="display:flex;flex-direction:column;gap:4px">
+                <span style="font-size:10px;font-weight:700;color:var(--text-tertiary)">HIGHLIGHT STAGE</span>
+                <div id="stage-btn-container-a" style="display:flex;gap:4px"></div>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <span class="section-label">Network Diagram (spatial unroll — each column is one hardware pass)</span>
+        <div class="net-scroll" style="max-height:none">
+            <div id="passA-canvas" class="net-canvas"></div>
+        </div>
+    </div>
+    <div class="card" id="traceA-card">
+        <span class="section-label">Stage-by-Stage Trace with Twiddle Factors</span>
+        <div id="traceA-content"></div>
+    </div>
+</div>
+
+<!-- TAB 6: PE-A + PE-B LOOP-BACK -->
+<div class="panel" id="tab6">
+    <div class="card">
+        <span class="section-label">PE-A + PE-B — Hardware Loop-Back Architecture</span>
+        <div class="input-area">
+            <textarea class="input-shared" placeholder="e.g. 1,2,3,4,5,6,7,8" oninput="onInputChange(this)">1, 2, 3, 4, 5, 6, 7, 8</textarea>
+            <div class="input-info"><span id="pass-info-b">Length: 8</span><span id="pass-pad-b" class="highlight">N: 8</span></div>
+        </div>
+        <div class="arch-note" id="arch-note-b">
+            <b>How this hardware works:</b> There is <b>one PE-A and one PE-B block</b>, always used as a fixed pair. Data goes: SRAM → PE-A → PE-B → SRAM (one full loop = 2 stages). The loop repeats ⌈log₂N / 2⌉ times. Each loop, data re-enters PE-A from scratch — the full PE-A → PE-B path is always traversed together.
+        </div>
+        <div class="controls-row" style="margin-top:1rem; margin-bottom: 0;">
+            <div style="display:flex;flex-direction:column;gap:4px">
+                <span style="font-size:10px;font-weight:700;color:var(--text-tertiary)">HIGHLIGHT STAGE</span>
+                <div id="stage-btn-container-b" style="display:flex;gap:4px"></div>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <span class="section-label">Network Diagram (spatial unroll — each paired column is one hardware loop)</span>
+        <div class="net-scroll" style="max-height:none">
+            <div id="passB-canvas" class="net-canvas"></div>
+        </div>
+    </div>
+    <div class="card" id="traceB-card">
+        <span class="section-label">Stage-by-Stage Trace with Twiddle Factors</span>
+        <div id="traceB-content"></div>
+    </div>
+</div>
+</div><!-- /container -->
+
+<script>
+class Complex {
+    constructor(re,im=0){this.re=re;this.im=im}
+    add(c){return new Complex(this.re+c.re,this.im+c.im)}
+    sub(c){return new Complex(this.re-c.re,this.im-c.im)}
+    mul(c){return new Complex(this.re*c.re-this.im*c.im,this.re*c.im+this.im*c.re)}
+    toString(){
+        const f=n=>{let s=n.toFixed(2);while(s.includes('.')&&(s.endsWith('0')||s.endsWith('.')))s=s.slice(0,-1);return s};
+        if(Math.abs(this.im)<0.005)return f(this.re);
+        if(Math.abs(this.re)<0.005)return f(this.im)+'j';
+        return `${f(this.re)}${this.im<0?'':'+'}${f(this.im)}j`;
+    }
+}
+
+let N=8,stages=3,stageValues=[],bitRevOrder=[],currentInputs=[],currentView='all',activeStageNum=-1,targetBin=2;
+let activeStageA=-1, activeStageB=-1;
+
+function onInputChange(sourceEl){
+    const inputs=document.querySelectorAll('.input-shared');
+    const src=sourceEl||document.getElementById('raw-input')||inputs[0];
+    if(!src)return;
+    inputs.forEach(el=>{if(el!==src)el.value=src.value});
+    const nums=src.value.split(/[,\s\n]+/).map(s=>parseFloat(s)).filter(n=>!isNaN(n));
+    if(!nums.length)return;
+    const L=nums.length;
+    stages=Math.ceil(Math.log2(Math.max(L,2)));
+    N=Math.pow(2,stages);
+    // Clamp to N<=64
+    if(N>64){stages=6;N=64}
+    const ui=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v};
+    ui('len-info',`Length: ${L}`);
+    ui('pad-info',`N: ${N}${L<N?' (padded with '+(N-L)+' zeros)':''}`)
+    ;['a','b'].forEach(x=>{ui('pass-info-'+x,`Length: ${L}`);ui('pass-pad-'+x,`N: ${N}${L<N?' (padded)':''}`)});
+    const bc=document.getElementById('stage-btn-container');
+    bc.innerHTML='<button class="stbtn active" onclick="setActiveStage(-1,this)">All</button>';
+    for(let i=0;i<stages;i++)bc.innerHTML+=`<button class="stbtn" onclick="setActiveStage(${i},this)">${i+1}</button>`;
+    
+    const bcA=document.getElementById('stage-btn-container-a');
+    if(bcA){
+        bcA.innerHTML='<button class="stbtn active" onclick="setActiveStageA(-1,this)">All Stages</button>';
+        for(let i=0;i<stages;i++)bcA.innerHTML+=`<button class="stbtn" onclick="setActiveStageA(${i},this)">Stage ${i+1}</button>`;
+    }
+    const bcB=document.getElementById('stage-btn-container-b');
+    if(bcB){
+        bcB.innerHTML='<button class="stbtn active" onclick="setActiveStageB(-1,this)">All Stages</button>';
+        for(let i=0;i<stages;i++)bcB.innerHTML+=`<button class="stbtn" onclick="setActiveStageB(${i},this)">Stage ${i+1}</button>`;
+    }
+
+    const binC=document.getElementById('bin-btn-container');
+    binC.innerHTML='';
+    for(let i=0;i<N;i++)binC.innerHTML+=`<button class="bin-btn${i===targetBin?' active':''}" onclick="setTargetBin(${i},this)">X${i}</button>`;
+    // Update arch notes
+    const loops3=Math.ceil(stages/2);
+    const an_a=document.getElementById('arch-note-a');
+    if(an_a)an_a.innerHTML=`<b>How this hardware works:</b> One physical <b>PE-A block</b>, one ping-pong SRAM pair. Data loops back ⌈log₂${N}/2⌉ = <b>${loops3} times</b>. Each loop covers 2 stages. Only <code>W_base</code> register changes.${stages%2===1?' (Last pass covers 1 stage; second sub-stage is a pass-through.)':''}`;
+    const an_b=document.getElementById('arch-note-b');
+    if(an_b)an_b.innerHTML=`<b>How this hardware works:</b> One <b>PE-A + PE-B pair</b>, one ping-pong SRAM. Data loops back ⌈log₂${N}/2⌉ = <b>${loops3} times</b>. Each loop: SRAM → PE-A (1 stage) → PE-B (1 stage) → SRAM. The full PE-A→PE-B path is always traversed together even if the last loop only computes some stages.`;
+    calculate(nums);
+}
+
+function bitReverse(n,bits){let r=0;for(let i=0;i<bits;i++){r=(r<<1)|(n&1);n>>=1}return r}
+
+function calculate(nums){
+    const inputs=nums.map(n=>new Complex(n));
+    while(inputs.length<N)inputs.push(new Complex(0));
+    currentInputs=inputs.slice();
+    bitRevOrder=[];
+    for(let i=0;i<N;i++)bitRevOrder.push(bitReverse(i,stages));
+    stageValues=[];
+    stageValues[0]=bitRevOrder.map(idx=>inputs[idx]);
+    for(let s=0;s<stages;s++){
+        const prev=stageValues[s];const curr=[...prev];const stride=Math.pow(2,s);
+        for(let i=0;i<N;i+=(stride*2))for(let k=0;k<stride;k++){
+            const angle=-2*Math.PI*k/(stride*2);
+            const tw=new Complex(Math.cos(angle),Math.sin(angle));
+            const a=i+k,b=i+k+stride;
+            const t=tw.mul(prev[b]);curr[a]=prev[a].add(t);curr[b]=prev[a].sub(t);
+        }
+        stageValues[s+1]=curr;
+    }
+    renderFFT();
+}
+
+// ─── apply N stages starting at startStage (uses global stageValues) ───
+function getStageVals(startStage){
+    // Returns array of N complex values after running `count` stages
+    // But we use the pre-computed stageValues for accuracy
+    return stageValues[startStage]||[];
+}
+
+function applyShuffle(arr){
+    // Correct stride-2 interleave: pair E[k] (first half) with O[k] (second half)
+    // out = [E0, O0, E1, O1, ...] so adjacent PE slots see butterfly partners
+    const out=new Array(N);
+    const half=N/2;
+    for(let k=0;k<half;k++){
+        out[2*k]   = arr[k];        // even slot k  <- first half
+        out[2*k+1] = arr[k+half];   // odd slot k+1 <- second half
+    }
+    return out;
+}
+
+function fmtW(k,stride){
+    // Returns W_N^k string for stride-sized butterfly (N_sub = stride*2)
+    const Nsub=stride*2;
+    const angle=-2*Math.PI*k/Nsub;
+    const c=new Complex(Math.cos(angle),Math.sin(angle));
+    // Nice labels for common values
+    if(Math.abs(c.re-1)<0.001&&Math.abs(c.im)<0.001)return 'W=1';
+    if(Math.abs(c.re)<0.001&&Math.abs(c.im+1)<0.001)return 'W=−j';
+    if(Math.abs(c.re+1)<0.001&&Math.abs(c.im)<0.001)return 'W=−1';
+    if(Math.abs(c.re)<0.001&&Math.abs(c.im-1)<0.001)return 'W=+j';
+    return `W${Nsub}^${k}=${c.toString()}`;
+}
+
+// ─── TRACE TABLES ───
+function buildTraceTable_3PEA(){
+    const loops=Math.ceil(stages/2);
+    let html='<table class="trace-table"><thead><tr>';
+    html+='<th>Pass / Stage</th><th>Block</th><th>BF pairs (N/2 total)</th><th>Span</th><th>Twiddle W used</th><th>Output at entry</th></tr></thead><tbody>';
+
+    for(let loop=0;loop<loops;loop++){
+        const stgA=loop*2;
+        const stgB=loop*2+1;
+        html+=`<tr class="pass-header"><td colspan="6">🔁 Loop ${loop+1} of ${loops} — data loops back into SRAM after this pass</td></tr>`;
+        // SRAM read row
+        html+=`<tr class="sram-row"><td colspan="6">📥 SRAM read (${loop===0?'bit-reversed input':'shuffled output from loop '+(loop)})</td></tr>`;
+        // Stage A
+        if(stgA<stages){
+            const span=Math.pow(2,stgA);
+            const twiddlesA=[];for(let k=0;k<span&&k<4;k++)twiddlesA.push(fmtW(k,span));
+            const sampA=stageValues[stgA].slice(0,4).map(v=>v.toString()).join(', ')+'…';
+            html+=`<tr class="stage-row"><td><span class="badge badge-green">Stage ${stgA+1}</span></td><td>PE-A (sub-stage 1)</td><td>${N/2} butterflies</td><td>span=${span}</td><td class="mono">${twiddlesA.join(' | ')}</td><td class="mono">[${sampA}]</td></tr>`;
+        }
+        // Stage B
+        if(stgB<stages){
+            const span=Math.pow(2,stgB);
+            const twiddlesB=[];for(let k=0;k<span&&k<4;k++)twiddlesB.push(fmtW(k,span));
+            const sampB=stageValues[stgB].slice(0,4).map(v=>v.toString()).join(', ')+'…';
+            html+=`<tr class="stage-row"><td><span class="badge badge-green">Stage ${stgB+1}</span></td><td>PE-A (sub-stage 2)</td><td>${N/2} butterflies</td><td>span=${span}</td><td class="mono">${twiddlesB.join(' | ')}</td><td class="mono">[${sampB}]</td></tr>`;
+        } else if(stgA<stages){
+            html+=`<tr class="stage-row" style="opacity:0.4"><td><span class="badge badge-purple">passthru</span></td><td>PE-A (sub-stage 2)</td><td colspan="4">straight-through (odd number of stages)</td></tr>`;
+        }
+        // Shuffle
+        if(loop<loops-1){
+            html+=`<tr class="shuffle-row"><td><span class="badge badge-purple">Shuffle</span></td><td colspan="5">Address reorder: (i×2) mod ${N} — same formula every loop — then written to SRAM B</td></tr>`;
+            html+=`<tr class="sram-row"><td colspan="6">📤 SRAM write (shuffled result → becomes input for loop ${loop+2})</td></tr>`;
+        } else {
+            html+=`<tr class="sram-row"><td colspan="6">📤 SRAM write — final output X[0]…X[${N-1}] in natural order ✓</td></tr>`;
+        }
+    }
+    html+='</tbody></table>';
+    // Value snapshot
+    html+=`<div style="margin-top:12px;font-size:0.8rem;color:var(--text-secondary)"><b>After all ${loops} loops, output values X[k] (first 8):</b><br>`;
+    const out=stageValues[stages];
+    for(let i=0;i<Math.min(8,N);i++)html+=`X[${i}]=${out[i].toString()}  `;
+    html+=N>8?'…':'';
+    html+='</div>';
+    return html;
+}
+
+function buildTraceTable_PEAB(){
+    const loops=Math.ceil(stages/2);
+    let html='<table class="trace-table"><thead><tr>';
+    html+='<th>Loop / Stage</th><th>Block</th><th>BF pairs</th><th>Span</th><th>Twiddle W</th><th>Output at entry</th></tr></thead><tbody>';
+
+    for(let loop=0;loop<loops;loop++){
+        const stgA=loop*2, stgB=loop*2+1;
+
+        html+=`<tr class="pass-header"><td colspan="6">🔁 Loop ${loop+1} of ${loops} — SRAM → PE-A → PE-B → SRAM</td></tr>`;
+        html+=`<tr class="sram-row"><td colspan="6">📥 SRAM read — ${loop===0?'bit-reversed input':'shuffled result from loop '+(loop)}</td></tr>`;
+
+        // PE-A
+        if(stgA < stages){
+            const span=Math.pow(2,stgA);
+            const tw=[];for(let k=0;k<Math.min(span,4);k++)tw.push(fmtW(k,span));
+            const samp=stageValues[stgA].slice(0,4).map(v=>v.toString()).join(', ')+'…';
+            html+=`<tr class="stage-row"><td><span class="badge badge-green">Stage ${stgA+1}</span></td><td>PE-A</td><td>${N/2}</td><td>span=${span}</td><td class="mono">${tw.join(' | ')}</td><td class="mono">[${samp}]</td></tr>`;
+        }
+        // PE-B
+        if(stgB < stages){
+            const span=Math.pow(2,stgB);
+            const tw=[];for(let k=0;k<Math.min(span,4);k++)tw.push(fmtW(k,span));
+            const samp=stageValues[stgB].slice(0,4).map(v=>v.toString()).join(', ')+'…';
+            html+=`<tr class="stage-row"><td><span class="badge badge-orange">Stage ${stgB+1}</span></td><td>PE-B</td><td>${N/2}</td><td>span=${span}</td><td class="mono">${tw.join(' | ')}</td><td class="mono">[${samp}]</td></tr>`;
+        } else {
+            html+=`<tr class="stage-row" style="opacity:0.4"><td><span class="badge badge-purple">passthru</span></td><td>PE-B (passthrough)</td><td colspan="4">-</td></tr>`;
+        }
+
+        if(loop<loops-1){
+            html+=`<tr class="shuffle-row"><td><span class="badge badge-purple">Shuffle</span></td><td colspan="5">Address reorder: (i×2) mod ${N}</td></tr>`;
+            html+=`<tr class="sram-row"><td colspan="6">📤 SRAM write → loop back</td></tr>`;
+        } else {
+            html+=`<tr class="sram-row"><td colspan="6">📤 SRAM write — final output ✓</td></tr>`;
+        }
+    }
+    html+='</tbody></table>';
+    html+=`<div style="margin-top:12px;font-size:0.8rem;color:var(--text-secondary)"><b>Final outputs X[k] (first 8):</b><br>`;
+    const out=stageValues[stages];
+    for(let i=0;i<Math.min(8,N);i++)html+=`X[${i}]=${out[i].toString()}  `;
+    html+=N>8?'…':'';
+    html+='</div>';
+    return html;
+}
+
+// ─── SVG FFT RENDERER ───
+function renderFFT(){
+    const svg=document.getElementById('fft-svg');
+    const stageWidth=150,rowHeight=48;
+    const width=(stages+2)*stageWidth,height=(N+1)*rowHeight;
+    svg.setAttribute('width',width);svg.setAttribute('height',height);svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
+    const xs=Array.from({length:stages+2},(_,i)=>70+i*stageWidth);
+    const ys=Array.from({length:N},(_,i)=>40+i*rowHeight);
+    let html='';
+    const pathNodes=(currentView==='trace')?getPathIndices(targetBin):null;
+    for(let s=0;s<stages;s++){
+        const stride=Math.pow(2,s);
+        const isActive=(currentView==='all'||activeStageNum===s||currentView==='trace');
+        const color=['#14b8a6','#3b82f6','#f59e0b','#ef4444','#8b5cf6'][s%5];
+        for(let i=0;i<N;i+=(stride*2))for(let k=0;k<stride;k++){
+            const a=i+k,b=i+k+stride;
+            const pn=(currentView==='trace')?getPathIndices(targetBin):null;
+            let op=(currentView==='trace')?0.1:(isActive?1:0.1),sw=1,c=(isActive)?color:'var(--border-secondary)';
+            if(currentView==='trace'){
+                if(pn[s+1].includes(a)&&pn[s+2].includes(a)){c='var(--accent-orange)';sw=2;op=1}
+                if(pn[s+1].includes(b)&&pn[s+2].includes(b)){c='var(--accent-orange)';sw=2;op=1}
+            }
+            html+=`<line x1="${xs[s]}" y1="${ys[a]}" x2="${xs[s+1]}" y2="${ys[a]}" stroke="${c}" stroke-width="${sw}" opacity="${op}"/>`;
+            html+=`<line x1="${xs[s]}" y1="${ys[b]}" x2="${xs[s+1]}" y2="${ys[b]}" stroke="${c}" stroke-width="${sw}" opacity="${op}"/>`;
+            let cx=c,ox=op,swx=sw;
+            if(currentView==='trace'){
+                const ci=(pn[s+1].includes(a)&&pn[s+2].includes(b))||(pn[s+1].includes(b)&&pn[s+2].includes(a));
+                if(ci){cx='var(--accent-orange)';swx=2;ox=1}else{ox=0.1;swx=1;cx='var(--border-secondary)'}
+            }
+            html+=`<line x1="${xs[s]}" y1="${ys[a]}" x2="${xs[s+1]}" y2="${ys[b]}" stroke="${cx}" stroke-width="${swx}" opacity="${ox}" stroke-dasharray="4,2"/>`;
+            html+=`<line x1="${xs[s]}" y1="${ys[b]}" x2="${xs[s+1]}" y2="${ys[a]}" stroke="${cx}" stroke-width="${swx}" opacity="${ox}" stroke-dasharray="4,2"/>`;
+            if(ox>0.5){
+                const tw=new Complex(Math.cos(-2*Math.PI*k/(stride*2)),Math.sin(-2*Math.PI*k/(stride*2)));
+                html+=`<text x="${xs[s]+25}" y="${ys[b]-5}" class="val-label" style="font-size:8px">W=${tw.toString()}</text>`;
+            }
+        }
+    }
+    for(let s=0;s<=stages;s++){
+        ys.forEach((y,i)=>{
+            const val=stageValues[s][i];
+            const pn=(currentView==='trace')?getPathIndices(targetBin):null;
+            const isH=pn&&pn[s+1].includes(i);
+            html+=`<circle cx="${xs[s]}" cy="${y}" r="${isH?5:3}" fill="${isH?'var(--accent-orange)':(val.re!==0||val.im!==0?'var(--accent-blue)':'var(--text-tertiary)')}"/>`;
+            if(s===0)html+=`<text x="${xs[0]-12}" y="${y+4}" text-anchor="end" font-family="var(--font-mono)" class="io-label">x[${bitRevOrder[i]}]=${val.toString()}</text>`;
+            if(s===stages)html+=`<text x="${xs[stages]+12}" y="${y+4}" text-anchor="start" font-family="var(--font-mono)" class="io-label">X[${i}]=${val.toString()}</text>`;
+            if(isH||(activeStageNum!==-1&&s===activeStageNum+1))html+=`<text x="${xs[s]}" y="${y-10}" text-anchor="middle" class="val-label">${val.toString()}</text>`;
+        });
+    }
+    svg.innerHTML=html;
+    updateResult();
+    renderBitRev();
+    renderPassDiagrams();
+}
+
+function getPathIndices(bin){
+    const tree=Array.from({length:stages+2},()=>[]);
+    let cur=[bin];tree[stages+1]=[...cur];
+    for(let s=stages-1;s>=0;s--){
+        const next=[];const stride=Math.pow(2,s);
+        cur.forEach(idx=>{
+            const p=(idx%(stride*2)<stride)?idx+stride:idx-stride;
+            if(!next.includes(idx))next.push(idx);
+            if(!next.includes(p))next.push(p);
+        });
+        tree[s+1]=[...next];cur=next;
+    }
+    return tree;
+}
+
+function updateResult(){
+    const res=document.getElementById('trace-result');
+    if(currentView==='all')res.innerHTML=`N=${N}, Stages=${stages}, Total BF=${(N/2)*stages}. Change input to watch the network update.`;
+    else if(currentView==='trace'){
+        const path=getPathIndices(targetBin);
+        const inp=path[1].map(i=>`x[${bitRevOrder[i]}]`).join(', ');
+        res.innerHTML=`DEEP TRACE: Bin X[${targetBin}]\nDependencies: ${inp}\nFinal value: ${stageValues[stages][targetBin].toString()}`;
+    } else res.innerHTML=`Stage ${activeStageNum+1} active. Stride=${Math.pow(2,activeStageNum)}.`;
+}
+
+function setActiveStage(s,btn){activeStageNum=s;currentView='all';document.querySelectorAll('#tab4 .stbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderFFT()}
+function setActiveStageA(s,btn){activeStageA=s;document.getElementById('stage-btn-container-a').querySelectorAll('.stbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderPassDiagrams()}
+function setActiveStageB(s,btn){activeStageB=s;document.getElementById('stage-btn-container-b').querySelectorAll('.stbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderPassDiagrams()}
+function setTraceView(v,btn){currentView=v;document.querySelectorAll('#tab4 .stbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.getElementById('bin-btns').style.display=v==='trace'?'flex':'none';renderFFT()}
+function setTargetBin(b,btn){targetBin=b;document.querySelectorAll('.bin-btn').forEach(x=>x.classList.remove('active'));btn.classList.add('active');currentView='trace';document.getElementById('mode-trace').classList.add('active');document.getElementById('mode-all').classList.remove('active');document.getElementById('bin-btns').style.display='flex';renderFFT()}
+
+function showTab(i){
+    document.querySelectorAll('.panel').forEach((p,j)=>p.classList.toggle('active',j===i));
+    document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('active',j===i));
+    if(i===3)renderBitRev();
+    if(i===5||i===6)renderPassDiagrams();
+}
+
+function renderBitRev(){
+    document.getElementById('bitrev-info').textContent=`Bit-reversal mapping for N=${N}:`;
+    const row=document.getElementById('bitrev-row');row.innerHTML='';
+    for(let i=0;i<N;i++){
+        const r=bitReverse(i,stages);
+        const div=document.createElement('div');div.className='bit-box';
+        div.innerHTML=`<div class="idx">${i}</div><div style="font-size:10px;opacity:0.6">${i.toString(2).padStart(stages,'0')}</div><div>↓</div><div class="idx" style="background:var(--accent-orange)">${r}</div>`;
+        row.appendChild(div);
+    }
+}
+
+function renderPassDiagrams(){
+    renderThreePEA();
+    renderTwo4PE();
+    // Trace tables
+    const ta=document.getElementById('traceA-content');
+    if(ta)ta.innerHTML=buildTraceTable_3PEA();
+    const tb=document.getElementById('traceB-content');
+    if(tb)tb.innerHTML=buildTraceTable_PEAB();
+}
+
+// ─── CANVAS HELPERS ───
+function clearCanvas(el){if(el)while(el.firstChild)el.removeChild(el.firstChild)}
+
+function addBox(c,x,y,w,h,cls){
+    const b=document.createElement('div');b.className=`net-box ${cls}`;
+    Object.assign(b.style,{left:`${x}px`,top:`${y}px`,width:`${w}px`,height:`${h}px`});
+    c.appendChild(b);return b;
+}
+function addLabel(c,text,x,y,w){
+    const l=document.createElement('div');l.className='net-label';l.innerHTML=text;
+    Object.assign(l.style,{left:`${x}px`,top:`${y}px`,width:`${w}px`});c.appendChild(l);
+}
+function addIOLabel(c,text,x,y){
+    const l=document.createElement('div');l.className='net-io-label';l.textContent=text;
+    Object.assign(l.style,{left:`${x}px`,top:`${y}px`});c.appendChild(l);
+}
+function addValueLabel(c,val,x,y){
+    if(!val)return;
+    const l=document.createElement('div');l.className='net-val';l.textContent=val;
+    Object.assign(l.style,{left:`${x}px`,top:`${y}px`});c.appendChild(l);
+}
+
+function getMarker(svg, color) {
+    const cid = 'arr-' + color.replace(/[^a-zA-Z0-9]/g, '');
+    let defs = svg.querySelector('defs');
+    if(!defs) { 
+        defs = document.createElementNS('http://www.w3.org/2000/svg','defs'); 
+        svg.appendChild(defs); 
+    }
+    if(!svg.querySelector(`#${cid}`)){
+        const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+        marker.setAttribute('id', cid);
+        marker.setAttribute('viewBox', '0 0 10 10');
+        marker.setAttribute('refX', '9');
+        marker.setAttribute('refY', '5');
+        marker.setAttribute('markerWidth', '6');
+        marker.setAttribute('markerHeight', '6');
+        marker.setAttribute('orient', 'auto-start-reverse');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M 2 1 L 8 5 L 2 9');
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', color);
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('stroke-linecap', 'round');
+        marker.appendChild(path);
+        defs.appendChild(marker);
+    }
+    return `url(#${cid})`;
+}
+
+function addSVGLine(c,x1,y1,x2,y2,color,w=1,dash=false,isActive=true){
+    let svg=c._svg;
+    if(!svg){
+        svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+        svg.style.cssText='position:absolute;top:0;left:0;pointer-events:none;overflow:visible;z-index:5;';
+        c.appendChild(svg);
+        c._svg=svg;
+    }
+    const op = isActive ? 1 : 0.15;
+    const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',x1);line.setAttribute('y1',y1);line.setAttribute('x2',x2);line.setAttribute('y2',y2);
+    line.setAttribute('stroke',color);line.setAttribute('stroke-width',w);
+    line.setAttribute('opacity',op);
+    if(dash)line.setAttribute('stroke-dasharray','6 3');
+    line.setAttribute('marker-end', getMarker(svg, color));
+    svg.appendChild(line);
+}
+
+function addLoopBackArrow(c,fromX,fromY,toX,toY,label,color,dropY,isActive=true){
+    // fromX,fromY = start point (right edge of shuffle, at bottom of box row)
+    // toX,toY     = end point   (left edge of next PE-A, at bottom of box row)
+    // dropY       = how far BELOW the boxes the horizontal bridge runs
+    // Path: down from fromX,fromY → across at dropY → up to toX,toY
+    let svg=c._svg;
+    if(!svg){
+        svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+        svg.style.cssText='position:absolute;top:0;left:0;pointer-events:none;overflow:visible;z-index:5;';
+        c.appendChild(svg);c._svg=svg;
+    }
+    const op = isActive ? 1 : 0.15;
+    const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+    // go down from fromY to dropY, across, then up to toY
+    const d=`M${fromX},${fromY} L${fromX},${dropY} L${toX},${dropY} L${toX},${toY}`;
+    path.setAttribute('d',d);path.setAttribute('fill','none');
+    path.setAttribute('stroke',color);path.setAttribute('stroke-width',2.5);
+    path.setAttribute('stroke-dasharray','8 4');
+    path.setAttribute('opacity',op);
+
+    const cid = 'arr-lb-' + color.replace(/[^a-zA-Z0-9]/g, '');
+    let defs = svg.querySelector('defs');
+    if(!defs) { defs = document.createElementNS('http://www.w3.org/2000/svg','defs'); svg.appendChild(defs); }
+    if(!svg.querySelector(`#${cid}`)){
+        defs.insertAdjacentHTML('beforeend', `<marker id="${cid}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>`);
+    }
+    path.setAttribute('marker-end',`url(#${cid})`);
+    svg.appendChild(path);
+
+    // label on the horizontal bridge segment
+    const midX=(fromX+toX)/2;
+    const txt=document.createElementNS('http://www.w3.org/2000/svg','text');
+    txt.setAttribute('x',midX);txt.setAttribute('y',dropY+14);
+    txt.setAttribute('text-anchor','middle');txt.setAttribute('font-size','11');
+    txt.setAttribute('font-family','var(--font-sans)');txt.setAttribute('font-weight','600');
+    txt.setAttribute('fill',color);
+    txt.setAttribute('opacity',op);
+    txt.textContent=label;
+    svg.appendChild(txt);
+}
+
+// ─── 3× PE-A RENDERER ───
+function renderThreePEA(){
+    const canvas=document.getElementById('passA-canvas');
+    if(!canvas||!currentInputs.length)return;
+    clearCanvas(canvas);canvas._svg=null;
+
+    const loops=Math.ceil(stages/2);
+    const rowH=Math.max(16,Math.min(28,400/N));
+    const topPad=60,leftPad=50,gap=18;
+    const bitW=80,peaW=120,shufW=90,outW=80,sramW=70;
+
+    // Compute pipeline snapshots
+    // snap[0] = bit-reversed input
+    // snap[1] = after PE-A loop0 (stages 0+1 both done)
+    // snap[2] = after shuffle
+    // snap[3] = after PE-A loop1 (stages 2+3 both done), etc.
+    let snap=[stageValues[0].map(v=>new Complex(v.re,v.im))];
+    let cur=snap[0];
+    for(let loop=0;loop<loops;loop++){
+        // Both sub-stages of this PE-A pass are done: grab state after (loop+1)*2 stages
+        const afterBoth=stageValues[Math.min((loop+1)*2, stages)];
+        snap.push(afterBoth);
+        cur=afterBoth;
+        if(loop<loops-1){
+            const shuf=applyShuffle(cur);
+            snap.push(shuf);
+            cur=shuf;
+        }
+    }
+
+    const boxH=N*rowH;
+    const rowY=i=>topPad+i*rowH+rowH/2;
+
+    // Build column list: [bitrev, pea, shuffle, pea, shuffle, pea, ..., out]
+    const cols=[];
+    // bit-rev
+    cols.push({type:'bitrev',x:leftPad,w:bitW});
+    let curX=leftPad+bitW+gap;
+    for(let loop=0;loop<loops;loop++){
+        cols.push({type:'pea',x:curX,w:peaW,loop,stgA:loop*2,stgB:loop*2+1});
+        curX+=peaW+gap;
+        if(loop<loops-1){
+            cols.push({type:'shuffle',x:curX,w:shufW,loop});
+            curX+=shufW+gap;
+        }
+    }
+    cols.push({type:'out',x:curX,w:outW});
+    curX+=outW+gap;
+
+    const totalW=curX+60,totalH=topPad+boxH+90;
+    canvas.style.width=`${totalW}px`;canvas.style.height=`${totalH}px`;
+
+    // Draw boxes & labels
+    cols.forEach(col=>{
+        if(col.type==='bitrev'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'red');
+            addLabel(canvas,`Bit-Reversal<br><small>${stages}-bit addr, once</small>`,col.x,topPad-46,col.w);
+        } else if(col.type==='pea'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'green');
+            const loopNum=col.loop+1;
+            const stgA=col.stgA, stgB=col.stgB;
+            const validA=stgA<stages, validB=stgB<stages;
+            const stgLabel=validB?`stg ${stgA+1}+${stgB+1}`:`stg ${stgA+1}`;
+            addLabel(canvas,`PE-A  pass ${loopNum}<br><small>${stgLabel}</small><br><small>W_base=${col.stgA===0?0:col.stgA*N/stages}</small>`,col.x,topPad-56,col.w);
+            // Hardware always sees span 1 (adj) and span 2 (2nd adj) because of shuffle
+            drawBFCrossesDiv(canvas,col.x,col.w,0,rowY,'#1D9E75',0.45,false, activeStageA===-1||activeStageA===stgA);
+            drawBFCrossesDiv(canvas,col.x,col.w,1,rowY,'#0e7a5a',0.35,true, activeStageA===-1||activeStageA===stgB);
+        } else if(col.type==='shuffle'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'purple');
+            addLabel(canvas,'Shuffle<br><small>E[k]→slot 2k</small><br><small>O[k]→slot 2k+1</small>',col.x,topPad-50,col.w);
+            drawShuffleLines(canvas,col.x,col.w,rowY,'#7F77DD', activeStageA===-1);
+        } else if(col.type==='out'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'blue');
+            addLabel(canvas,'Output<br><small>natural order ✓</small>',col.x,topPad-38,col.w);
+        }
+    });
+
+    // Draw horizontal wires between boxes
+    for(let ci=0;ci<cols.length-1;ci++){
+        const from=cols[ci],to=cols[ci+1];
+        let isWireActive = activeStageA === -1;
+        if(to.type==='pea' && (activeStageA===to.stgA || activeStageA===to.stgB)) isWireActive=true;
+        else if(from.type==='pea' && (activeStageA===from.stgA || activeStageA===from.stgB)) isWireActive=true;
+        
+        for(let i=0;i<N;i++){
+            addSVGLine(canvas,from.x+from.w,rowY(i),to.x,rowY(i),'#666',1,false,isWireActive);
+        }
+    }
+
+    // Bit-rev crosses
+    const brc=cols[0];
+    for(let i=0;i<N;i++){
+        const j=bitReverse(i,stages);
+        addSVGLine(canvas, brc.x+4, rowY(i), brc.x+brc.w-4, rowY(j), '#E24B4A', 1, false, activeStageA === -1);
+    }
+
+    // IO labels
+    for(let i=0;i<N;i++){
+        addIOLabel(canvas,`x[${i}]`,cols[0].x-42,rowY(i)-6);
+        addIOLabel(canvas,`X[${i}]`,cols[cols.length-1].x+cols[cols.length-1].w+6,rowY(i)-6);
+    }
+
+    // Values
+    let snapIdx=0;
+    cols.forEach(col=>{
+        if(col.type==='out'){
+            const vals=stageValues[stages];
+            for(let i=0;i<N;i++)addValueLabel(canvas,vals[i].toString(),col.x+4,rowY(i)-8);
+        } else if(snapIdx<snap.length){
+            const vals=snap[snapIdx++];
+            if(vals)for(let i=0;i<N;i++)addValueLabel(canvas,vals[i].toString(),col.x+4,rowY(i)-8);
+        }
+    });
+
+    // ── LOOP-BACK ARROWS ──
+    // From shuffle's right edge, under the canvas, back to the next PE-A's left edge.
+    // Represents: data written to SRAM B → read back as input to next PE-A pass.
+    const belowY = topPad + boxH;
+    const dropY  = belowY + 36;
+    for(let ci=0;ci<cols.length;ci++){
+        const col=cols[ci];
+        if(col.type==='shuffle'){
+            const nextPEA=cols[ci+1];
+            if(nextPEA && nextPEA.type==='pea'){
+                const fromX = col.x + col.w;   // right edge of shuffle block
+                const toX   = nextPEA.x;        // left edge of next PE-A block
+                addLoopBackArrow(
+                    canvas,
+                    fromX, belowY,
+                    toX,   belowY,
+                    `↩ SRAM ping-pong: loop ${col.loop+1}→${col.loop+2}`,
+                    '#7F77DD', dropY, activeStageA===-1
+                );
+            }
+        }
+    }
+
+    // Resize SVG to cover full canvas including the loop-back arrow drop area
+    if(canvas._svg){
+        canvas._svg.setAttribute('width',totalW);
+        canvas._svg.setAttribute('height',totalH);
+    }
+}
+
+// ─── PE-A + PE-B RENDERER ───
+function renderTwo4PE(){
+    const canvas=document.getElementById('passB-canvas');
+    if(!canvas||!currentInputs.length)return;
+    clearCanvas(canvas);canvas._svg=null;
+
+    const loops = Math.ceil(stages / 2);
+    const rowH=Math.max(16,Math.min(28,400/N));
+    const topPad=60,leftPad=50,gap=18;
+    const bitW=80,peaW=120,pebW=120,shufW=90,outW=80;
+
+    const boxH=N*rowH;
+    const rowY=i=>topPad+i*rowH+rowH/2;
+
+    // Build columns: bitrev, [pea, peb, shuffle] × loops, out
+    const cols=[];
+    cols.push({type:'bitrev',x:leftPad,w:bitW});
+    let curX=leftPad+bitW+gap;
+    for(let loop=0;loop<loops;loop++){
+        const stgA = loop * 2, stgB = loop * 2 + 1;
+        cols.push({type:'pea',x:curX,w:peaW,loop,stgA,stgB:stgA}); curX+=peaW+gap;
+        cols.push({type:'peb',x:curX,w:pebW,loop,stgA:stgB,stgB}); curX+=pebW+gap;
+        if(loop<loops-1){
+            cols.push({type:'shuffle',x:curX,w:shufW,loop});curX+=shufW+gap;
+        }
+    }
+    cols.push({type:'out',x:curX,w:outW});curX+=outW+gap;
+
+    const totalW=curX+60,totalH=topPad+boxH+90;
+    canvas.style.width=`${totalW}px`;canvas.style.height=`${totalH}px`;
+
+    // Pipeline snapshots: stageValues[0..stages]
+    const getSnap=stg=>stg<=stages?stageValues[stg]:stageValues[stages];
+
+    cols.forEach(col=>{
+        if(col.type==='bitrev'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'red');
+            addLabel(canvas,`Bit-Reversal<br><small>${stages}-bit addr, once</small>`,col.x,topPad-38,col.w);
+        } else if(col.type==='pea' || col.type==='peb'){
+            const color = col.type==='pea' ? 'green' : 'orange';
+            const badge = col.type==='pea' ? 'badge-green' : 'badge-orange';
+            const lineColor = col.type==='pea' ? '#1D9E75' : '#BA7517';
+            const lineColorAlt = col.type==='pea' ? '#0e7a5a' : '#8e5912';
+            addBox(canvas,col.x,topPad,col.w,boxH,color);
+            const stgA=col.stgA, stgB=col.stgB;
+            const validA=stgA<stages, validB=stgB<stages;
+            const label = validB ? `stg ${stgA+1}+${stgB+1}` : (validA ? `stg ${stgA+1}` : 'passthru');
+            addLabel(canvas,`${col.type.toUpperCase()}  loop ${col.loop+1}<br><small>${label}</small>`,col.x,topPad-56,col.w);
+            // Hardware is identical in every pass: span 1 and span 2
+            drawBFCrossesDiv(canvas,col.x,col.w,0,rowY,lineColor,0.45,false,activeStageB===-1||activeStageB===stgA);
+            drawBFCrossesDiv(canvas,col.x,col.w,1,rowY,lineColorAlt,0.35,true,activeStageB===-1||activeStageB===stgB);
+        } else if(col.type==='shuffle'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'purple');
+            addLabel(canvas,'Shuffle<br><small>E[k]→slot 2k</small><br><small>O[k]→slot 2k+1</small>',col.x,topPad-50,col.w);
+            drawShuffleLines(canvas,col.x,col.w,rowY,'#7F77DD',activeStageB===-1);
+        } else if(col.type==='out'){
+            addBox(canvas,col.x,topPad,col.w,boxH,'blue');
+            addLabel(canvas,'Output ✓',col.x,topPad-26,col.w);
+        }
+    });
+
+    // Wires
+    for(let ci=0;ci<cols.length-1;ci++){
+        const from=cols[ci],to=cols[ci+1];
+        let isWireActive = activeStageB === -1;
+        if(to.type==='pea' || to.type==='peb') { if(activeStageB===to.stgA) isWireActive=true; }
+        if(from.type==='pea' || from.type==='peb') { if(activeStageB===from.stgA) isWireActive=true; }
+
+        for(let i=0;i<N;i++)addSVGLine(canvas,from.x+from.w,rowY(i),to.x,rowY(i),'#666',1,false,isWireActive);
+    }
+
+    // Bit-rev crosses
+    const brc=cols[0];
+    for(let i=0;i<N;i++){
+        const j=bitReverse(i,stages);
+        addSVGLine(canvas, brc.x+4, rowY(i), brc.x+brc.w-4, rowY(j), '#E24B4A', 1, false, activeStageB === -1);
+    }
+
+    // IO labels
+    for(let i=0;i<N;i++){
+        addIOLabel(canvas,`x[${i}]`,cols[0].x-42,rowY(i)-6);
+        addIOLabel(canvas,`X[${i}]`,cols[cols.length-1].x+cols[cols.length-1].w+6,rowY(i)-6);
+    }
+
+    // Values
+    cols.forEach(col=>{
+        if(col.type==='bitrev'){
+            const v=stageValues[0];for(let i=0;i<N;i++)addValueLabel(canvas,v[i].toString(),col.x+4,rowY(i)-8);
+        } else if(col.type==='pea' || col.type==='peb'){
+            // Show values that enter this block (state before this block runs)
+            const v=getSnap(Math.min(col.stgA, stages));
+            for(let i=0;i<N;i++)addValueLabel(canvas,v[i].toString(),col.x+4,rowY(i)-8);
+        } else if(col.type==='shuffle'){
+            // Show values after both PE-A and PE-B for this loop have run, then shuffled
+            const v=applyShuffle(getSnap(Math.min(col.loop*2 + 2, stages)));
+            for(let i=0;i<N;i++)addValueLabel(canvas,v[i].toString(),col.x+4,rowY(i)-8);
+        } else if(col.type==='out'){
+            const v=stageValues[stages];for(let i=0;i<N;i++)addValueLabel(canvas,v[i].toString(),col.x+4,rowY(i)-8);
+        }
+    });
+
+    // Loop-back arrows below:
+    // From the shuffle block's right edge, loop under and back to the
+    // PE-A block of the NEXT loop (first block after the shuffle).
+    // This shows the SRAM ping-pong: shuffle output is written to SRAM,
+    // then read again as input to the next PE-A pass.
+    const belowY = topPad + boxH;
+    const dropY  = belowY + 36;  // how far below the boxes the arrow drops
+    cols.forEach((col,ci)=>{
+        if(col.type==='shuffle'){
+            const nextPEA=cols[ci+1];  // the PE-A starting the next loop
+            if(nextPEA && nextPEA.type==='pea'){
+                const fromX = col.x + col.w;          // right edge of shuffle
+                const toX   = nextPEA.x;              // left edge of next PE-A
+                addLoopBackArrow(
+                    canvas,
+                    fromX, belowY,   // start: bottom-right of shuffle
+                    toX,   belowY,   // end:   bottom-left of next PE-A
+                    `↩ SRAM ping-pong: loop ${col.loop+1}→${col.loop+2}`,
+                    '#7F77DD', dropY, activeStageB===-1
+                );
+            }
+        }
+    });
+
+    if(canvas._svg){canvas._svg.setAttribute('width',totalW);canvas._svg.setAttribute('height',totalH);}
+}
+
+// ─── Draw butterfly crosses inside a PE box using SVG ───
+function drawBFCrossesDiv(canvas,boxX,boxW,stageIndex,rowYfn,color,opacity,rightHalf=false,isActive=true){
+    let svg=canvas._svg;
+    if(!svg){
+        svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+        svg.style.cssText='position:absolute;top:0;left:0;pointer-events:none;overflow:visible;z-index:5;';
+        canvas.appendChild(svg);canvas._svg=svg;
+    }
+    const xLeft=boxX+(rightHalf?boxW*0.52:8);
+    const xRight=boxX+(rightHalf?boxW-8:boxW*0.48);
+    const op = isActive ? opacity * 1.5 : 0.1;
+    const sw = isActive ? 1.5 : 1;
+
+    if(stageIndex>=stages){
+        // Passthrough: just horizontal lines
+        for(let i=0;i<N;i++){
+            const y=rowYfn(i);
+            const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+            l.setAttribute('x1',xLeft);l.setAttribute('y1',y);l.setAttribute('x2',xRight);l.setAttribute('y2',y);
+            l.setAttribute('stroke',color);l.setAttribute('stroke-width',sw);l.setAttribute('opacity',op);
+            l.setAttribute('marker-end', getMarker(svg, color));
+            svg.appendChild(l);
+        }
+        return;
+    }
+
+    const span=Math.pow(2,stageIndex);
+    for(let i=0;i<N;i+=(span*2))for(let k=0;k<span;k++){
+        const a=i+k,b=i+k+span;if(b>=N)continue;
+        const ya=rowYfn(a),yb=rowYfn(b);
+        // Standard Radix-2 DIT Butterfly: 4 paths
+        // Top straight
+        const l1=document.createElementNS('http://www.w3.org/2000/svg','line');
+        l1.setAttribute('x1',xLeft);l1.setAttribute('y1',ya);l1.setAttribute('x2',xRight);l1.setAttribute('y2',ya);
+        l1.setAttribute('stroke',color);l1.setAttribute('stroke-width',sw);l1.setAttribute('opacity',op);
+        l1.setAttribute('marker-end', getMarker(svg, color));
+        // Bot straight
+        const l2=document.createElementNS('http://www.w3.org/2000/svg','line');
+        l2.setAttribute('x1',xLeft);l2.setAttribute('y1',yb);l2.setAttribute('x2',xRight);l2.setAttribute('y2',yb);
+        l2.setAttribute('stroke',color);l2.setAttribute('stroke-width',sw);l2.setAttribute('opacity',op);
+        l2.setAttribute('marker-end', getMarker(svg, color));
+        // Cross diagonal 1
+        const l3=document.createElementNS('http://www.w3.org/2000/svg','line');
+        l3.setAttribute('x1',xLeft);l3.setAttribute('y1',ya);l3.setAttribute('x2',xRight);l3.setAttribute('y2',yb);
+        l3.setAttribute('stroke',color);l3.setAttribute('stroke-width',sw);l3.setAttribute('opacity',op);
+        l3.setAttribute('marker-end', getMarker(svg, color));
+        // Cross diagonal 2
+        const l4=document.createElementNS('http://www.w3.org/2000/svg','line');
+        l4.setAttribute('x1',xLeft);l4.setAttribute('y1',yb);l4.setAttribute('x2',xRight);l4.setAttribute('y2',ya);
+        l4.setAttribute('stroke',color);l4.setAttribute('stroke-width',sw);l4.setAttribute('opacity',op);
+        l4.setAttribute('marker-end', getMarker(svg, color));
+        
+        [l1,l2,l3,l4].forEach(l=>svg.appendChild(l));
+    }
+}
+
+function drawShuffleLines(canvas,boxX,boxW,rowYfn,color,isActive=true){
+    // Correct stride-2 interleave:
+    //   First-half slot k  → output slot 2k       (evens)
+    //   Second-half slot k+N/2 → output slot 2k+1 (odds)
+    // This pairs E[k] and O[k] into adjacent rows so the next PE
+    // can butterfly them as a span-1 pair.
+    let svg=canvas._svg;
+    if(!svg){
+        svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+        svg.style.cssText='position:absolute;top:0;left:0;pointer-events:none;overflow:visible;z-index:5;';
+        canvas.appendChild(svg);canvas._svg=svg;
+    }
+    const x1=boxX+4,x2=boxX+boxW-4;
+    const op = isActive ? 0.9 : 0.15;
+    const sw = isActive ? 1.5 : 1;
+    const half=Math.floor(N/2);
+    for(let k=0;k<half;k++){
+        // E[k] (slot k) → slot 2k
+        const la=document.createElementNS('http://www.w3.org/2000/svg','line');
+        la.setAttribute('x1',x1);la.setAttribute('y1',rowYfn(k));
+        la.setAttribute('x2',x2);la.setAttribute('y2',rowYfn(2*k));
+        la.setAttribute('stroke',color);la.setAttribute('stroke-width',sw);la.setAttribute('opacity',op);
+        la.setAttribute('marker-end', getMarker(svg, color));
+        svg.appendChild(la);
+        // O[k] (slot k+half) → slot 2k+1
+        const lb=document.createElementNS('http://www.w3.org/2000/svg','line');
+        lb.setAttribute('x1',x1);lb.setAttribute('y1',rowYfn(k+half));
+        lb.setAttribute('x2',x2);lb.setAttribute('y2',rowYfn(2*k+1));
+        lb.setAttribute('stroke','#A855F7');lb.setAttribute('stroke-width',sw);lb.setAttribute('opacity',op);
+        lb.setAttribute('stroke-dasharray','4 2');
+        lb.setAttribute('marker-end', getMarker(svg, '#A855F7'));
+        svg.appendChild(lb);
+    }
+}
+
+window.onload=()=>onInputChange();
+</script>
+</body>
+</html>
