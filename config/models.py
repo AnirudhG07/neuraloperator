@@ -55,6 +55,7 @@ class FNOStagedConfig(ModelConfig):
     fixed_rank_modes: bool = False
     stabilizer: str = "None"
     preactivation: bool = False
+    no_br: bool = False
 
 
 class SimpleFNOConfig(FNOConfig):

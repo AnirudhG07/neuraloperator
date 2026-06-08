@@ -5,6 +5,7 @@ authors = [
     {name = "Jean Kossaifi <jean.kossaifi@gmail.com>, David Pitt <david.h.pitt@gmail.com>, Nik Kovachki, Zongyi Li", email="david.h.pitt@gmail.com"},
 ]
 dependencies = [
+    "torch",
     "wandb",
     "ruamel-yaml",
     "zencfg",
@@ -18,7 +19,7 @@ dependencies = [
     "zencfg>=0.3.0",
     "the-well>=1.2.0",
 ]
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 readme = "README.rst"
 license = {text = "MIT"}
 
@@ -26,6 +27,17 @@ license = {text = "MIT"}
 dynamic = ["version"]
 
 # Required config for build system
+[tool.uv]
+torch-backend = "cu121"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

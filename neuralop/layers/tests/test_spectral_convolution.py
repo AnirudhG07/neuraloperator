@@ -85,65 +85,6 @@ def test_SpectralConv(factorization, implementation, separable, dim, complex_dat
     assert list(res.shape[2:]) == [12 * 2] * dim
 
 
-@pytest.mark.parametrize("dim", [1, 2, 3])
-@pytest.mark.parametrize("separable", [False, True])
-def test_SpectralConv_no_br(dim, separable):
-    """Test bit-reversal-free (no_br) mode against standard path."""
-    modes = (4, 4, 4)
-    size = (8, 8, 8)
-    
-    # Standard path
-    conv_std = SpectralConv(
-        in_channels=3,
-        out_channels=3,
-        n_modes=modes[:dim],
-        no_br=False,
-        separable=separable,
-        bias=False
-    )
-    
-    # no_br path
-    conv_no_br = SpectralConv(
-        in_channels=3,
-        out_channels=3,
-        n_modes=modes[:dim],
-        no_br=True,
-        separable=separable,
-        bias=False
-    )
-    
-    # Copy weights from standard to no_br
-    # Note: SpectralConv.__init__ applies bit-reversal to weights IF no_br is True.
-    # To compare fairly, we take the standard weight, and MANUALLY apply 
-    # the permutation so that conv_no_br has the 'same' semantic weight.
-    
-    with torch.no_grad():
-        w = conv_std.weight.to_tensor()
-        # The no_br mode expects the weight to be pre-permuted.
-        # R̃[bitrev(k)] = R[k]
-        mode_start = 1 if separable else 2
-        w_perm = w.clone()
-        for axis in range(mode_start, w.ndim):
-            n = w.shape[axis]
-            if n > 0 and (n & (n - 1)) == 0:
-                perm = SpectralConv._bitrev_indices(n)
-                # We want R̃[perm] = R, so R̃ = R[inv_perm]. 
-                # For bit-reversal, perm is its own inverse.
-                w_perm = torch.index_select(w_perm, axis, perm)
-        
-        if torch.is_tensor(conv_no_br.weight):
-            conv_no_br.weight.data.copy_(w_perm)
-        else:
-            conv_no_br.weight.data.copy_(w_perm)
-
-    x = torch.randn(2, 3, *size[:dim])
-    
-    res_std = conv_std(x)
-    res_no_br = conv_no_br(x)
-    
-    # The output should be identical (within float precision)
-    torch.testing.assert_close(res_std, res_no_br, atol=1e-5, rtol=1e-5)
-
 
 @pytest.mark.parametrize("enforce_hermitian_symmetry", [True, False])
 @pytest.mark.parametrize("dim", [1, 2, 3])

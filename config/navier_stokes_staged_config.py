@@ -8,7 +8,7 @@ from .wandb import WandbConfig
 
 
 class NavierStokesOptConfig(OptimizationConfig):
-    n_epochs: int = 600
+    n_epochs: int = 300
     learning_rate: float = 3e-4
     training_loss: str = "h1"
     weight_decay: float = 1e-4

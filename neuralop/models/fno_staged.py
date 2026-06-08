@@ -59,6 +59,7 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
         preactivation: bool = False,
         conv_module: nn.Module = SpectralConv,
         enforce_hermitian_symmetry: bool = True,
+        no_br: bool = False,
     ):
         if decomposition_kwargs is None:
             decomposition_kwargs = {}
@@ -104,6 +105,7 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
         self.complex_data = complex_data
         self.fno_block_precision = fno_block_precision
         self.stabilizer = stabilizer
+        self.no_br = no_br
 
         if self.complex_data:
             self.non_linearity = CGELU
@@ -298,6 +300,24 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
         if self.complex_data:
             self.projection = ComplexValued(self.projection)
 
+    @staticmethod
+    def _bitrev_spatial(x: torch.Tensor) -> torch.Tensor:
+        """Permute each spatial dimension of x in bit-reversed order (P²=I).
+
+        Applied once before and once after the Fourier layers. Dims that are
+        not a power-of-2 are left unchanged (no-op, fallback to cuFFT path).
+        """
+        for dim in range(2, x.ndim):
+            n = x.shape[dim]
+            if n > 1 and (n & (n - 1)) == 0:
+                bits = int(n).bit_length() - 1
+                idx = torch.arange(n, dtype=torch.long, device=x.device)
+                rev = torch.zeros_like(idx)
+                for i in range(bits):
+                    rev = (rev << 1) | ((idx >> i) & 1)
+                x = torch.index_select(x, dim, rev)
+        return x
+
     def _forward_block_postactivation(self, x, index=0, output_shape=None):
         profiler = get_active_profiler()
         prefix = f"fno_blocks/{index}"
@@ -440,6 +460,9 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
             with maybe_profile(profiler, "fno/domain_padding/pad", x.device):
                 x = self.domain_padding.pad(x)
 
+        if self.no_br:
+            x = self._bitrev_spatial(x)
+
         for layer_idx in range(self.n_layers):
             if self.preactivation:
                 x = self._forward_block_preactivation(
@@ -449,6 +472,9 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
                 x = self._forward_block_postactivation(
                     x, layer_idx, output_shape=output_shape[layer_idx]
                 )
+
+        if self.no_br:
+            x = self._bitrev_spatial(x)  # P² = I, restores natural order
 
         if self.domain_padding is not None:
             with maybe_profile(profiler, "fno/domain_padding/unpad", x.device):
