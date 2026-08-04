@@ -41,13 +41,13 @@ class Default(ConfigBase):
         n_modes_per_layer=[
             [64, 64],
             [64, 64],
-            [48, 48],
+            [64, 64],
             [32, 32],
         ],
         max_n_modes_per_layer=[
             [64, 64],
             [64, 64],
-            [48, 48],
+            [64, 64],
             [32, 32],
         ],
         projection_channel_ratio=4,

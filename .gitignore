@@ -79,3 +79,4 @@ target/
 
 #Ipython Notebook
 .ipynb_checkpoints
+/tpu/tpu_profile/plugins/profile/2026_07_27_16_40_59

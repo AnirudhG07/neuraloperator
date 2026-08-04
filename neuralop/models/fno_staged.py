@@ -10,6 +10,8 @@ import warnings
 
 from ..layers.embeddings import GridEmbeddingND, GridEmbedding2D
 from ..layers.spectral_convolution import SpectralConv
+from ..layers.butterfly_fft import ButterflySpectralConv
+from ..layers.fused_fno_kernels import fused_norm_add_act
 from ..layers.padding import DomainPadding
 from ..layers.channel_mlp import ChannelMLP
 from ..layers.complex import ComplexValued, CGELU, ctanh
@@ -107,6 +109,11 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
         self.stabilizer = stabilizer
         self.no_br = no_br
 
+        # Use butterfly FFT variant when no_br is enabled and the default conv is SpectralConv
+        effective_conv_module = conv_module
+        if self.no_br and conv_module is SpectralConv:
+            effective_conv_module = ButterflySpectralConv
+
         if self.complex_data:
             self.non_linearity = CGELU
 
@@ -154,7 +161,7 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
 
         self.convs = nn.ModuleList(
             [
-                conv_module(
+                effective_conv_module(
                     self.hidden_channels,
                     self.hidden_channels,
                     n_modes=self.n_modes_per_layer[i],
@@ -345,16 +352,21 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
 
         x_fno = self.convs[index](x, output_shape=output_shape)
 
-        if self.norm is not None:
-            with maybe_profile(profiler, f"{prefix}/norm_0", x.device):
-                x_fno = self.norm[self.n_norms * index](x_fno)
-
-        with maybe_profile(profiler, f"{prefix}/fno_skip_add", x.device):
-            x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
-
-        if index < (self.n_layers - 1):
-            with maybe_profile(profiler, f"{prefix}/activation_0", x.device):
-                x = self.non_linearity(x)
+        # Uses Triton when no_br=True (GPU), falls back to PyTorch otherwise.
+        if self.no_br:
+            act0   = self.non_linearity if index < (self.n_layers - 1) else None
+            norm0  = self.norm[self.n_norms * index] if self.norm is not None else None
+            x_skip = x_skip_fno if self.fno_skips is not None else None
+            x      = fused_norm_add_act(x_fno, x_skip, norm0, act0)
+        else:
+            if self.norm is not None:
+                with maybe_profile(profiler, f"{prefix}/norm_0", x.device):
+                    x_fno = self.norm[self.n_norms * index](x_fno)
+            with maybe_profile(profiler, f"{prefix}/fno_skip_add", x.device):
+                x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
+            if index < (self.n_layers - 1):
+                with maybe_profile(profiler, f"{prefix}/activation_0", x.device):
+                    x = self.non_linearity(x)
 
         if self.use_channel_mlp:
             if self.channel_mlp_skips is not None:
@@ -366,13 +378,17 @@ class FNOStaged(BaseModel, name="FNO_Staged"):
                 with maybe_profile(profiler, f"{prefix}/channel_mlp", x.device):
                     x = self.channel_mlp[index](x)
 
-        if self.norm is not None:
-            with maybe_profile(profiler, f"{prefix}/norm_1", x.device):
-                x = self.norm[self.n_norms * index + 1](x)
-
-        if index < (self.n_layers - 1):
-            with maybe_profile(profiler, f"{prefix}/activation_1", x.device):
-                x = self.non_linearity(x)
+        if self.no_br:
+            act1  = self.non_linearity if index < (self.n_layers - 1) else None
+            norm1 = self.norm[self.n_norms * index + 1] if self.norm is not None else None
+            x     = fused_norm_add_act(x, None, norm1, act1)
+        else:
+            if self.norm is not None:
+                with maybe_profile(profiler, f"{prefix}/norm_1", x.device):
+                    x = self.norm[self.n_norms * index + 1](x)
+            if index < (self.n_layers - 1):
+                with maybe_profile(profiler, f"{prefix}/activation_1", x.device):
+                    x = self.non_linearity(x)
 
         return x
 
