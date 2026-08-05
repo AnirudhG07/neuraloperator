@@ -39,6 +39,7 @@ import re
 import time
 from functools import partial
 
+from einops import einsum
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -79,7 +80,6 @@ def _deep_split(Yb, m, N1, K, recurse):
     Wd = recurse(Zc, N1)
     return Wd.reshape(N1, B, K).reshape(m, K)
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  variant 1 — BASELINE : separate twiddle, explicit transpose + recurse
 # ═══════════════════════════════════════════════════════════════════════════
@@ -93,6 +93,9 @@ def small_dft_baseline(vecs, m):
 # ═══════════════════════════════════════════════════════════════════════════
 #  variant 2 — NO_TRANSPOSE : separate twiddle, inner DFT contracted IN PLACE
 #  (still needs ONE transpose at the end to get output order d*B+b — see note)
+#
+# "WRONG" : since we still end up tranposing and basically emperically proved
+# NO CHANGE
 # ═══════════════════════════════════════════════════════════════════════════
 def small_dft_no_transpose(vecs, m):
     if m <= B or m % B != 0:
@@ -116,8 +119,10 @@ def small_dft_no_transpose(vecs, m):
 #  W[b,d] = sum_c Ctwid_b[d,c] * Y[b,c],  Ctwid_b[d,c] = C_N1[d,c] * W_m^(b*c)
 #  WARNING: Ctwid is (B,N1,N1) and b-dependent -> a big, batched operand.  This is
 #  the "fold, don't fuse" trap; `inspect` shows bytes accessed goes UP, not down.
+#
+# "WRONG": Since we increase the size of the inner matrix, we actually increase the HBM traffic.
 # ═══════════════════════════════════════════════════════════════════════════
-def small_dft_fused(vecs, m):
+def smalll_dft_twiddle_fused(vecs, m):
     if m <= B or m % B != 0:
         return jnp.matmul(dft_matrix(m), vecs, preferred_element_type=ACCUM)   # leaf
     Yb, N1, K = _radix_b_dft(vecs, m)
@@ -125,13 +130,13 @@ def small_dft_fused(vecs, m):
         Ctwid = _twiddled_inner_matrix(N1, m)               # (B, N1, N1)
         Wd = jnp.einsum('bdc,bck->bdk', Ctwid, Yb, preferred_element_type=ACCUM)
         return jnp.transpose(Wd, (1, 0, 2)).reshape(m, K)
-    return _deep_split(Yb, m, N1, K, small_dft_fused)        # deep: fall back to separate
+    return _deep_split(Yb, m, N1, K, smalll_dft_twiddle_fused)        # deep: fall back to separate
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  variant 4 — FUSED_NO_TRANSPOSE : Q2 + Q3 together
 # ═══════════════════════════════════════════════════════════════════════════
-def small_dft_fused_no_transpose(vecs, m):
+def smalll_dft_twiddle_fused_no_transpose(vecs, m):
     if m <= B or m % B != 0:
         return jnp.matmul(dft_matrix(m), vecs, preferred_element_type=ACCUM)   # leaf
     Yb, N1, K = _radix_b_dft(vecs, m)
@@ -139,26 +144,29 @@ def small_dft_fused_no_transpose(vecs, m):
         Ctwid = _twiddled_inner_matrix(N1, m)               # (B, N1, N1)
         Wd = jnp.einsum('bdc,bck->bdk', Ctwid, Yb, preferred_element_type=ACCUM)
         return jnp.transpose(Wd, (1, 0, 2)).reshape(m, K)
-    return _deep_split(Yb, m, N1, K, small_dft_fused_no_transpose)
+    return _deep_split(Yb, m, N1, K, smalll_dft_twiddle_fused_no_transpose)
 
 
 def _twiddled_inner_matrix(N1, m):
     """(B, N1, N1) inner-DFT matrix with the level twiddle W_m^(b*c) baked in per b."""
     d = jnp.arange(N1)[:, None]
     c = jnp.arange(N1)[None, :]
-    C1 = jnp.exp(-2j * jnp.pi * (d * c) / N1)                # (N1, N1) inner DFT
+    C1 = jnp.exp(-2j * jnp.pi * (d * c) / N1) # (N1, N1) inner DFT
     b = jnp.arange(B)[:, None, None]
     cc = jnp.arange(N1)[None, None, :]
-    tw = jnp.exp(-2j * jnp.pi * (b * cc).astype(jnp.float32) / m)   # (B, 1, N1)
-    return (C1[None] * tw).astype(CDTYPE)                    # (B, N1, N1)
+    tw = jnp.exp(-2j * jnp.pi * (b * cc).astype(jnp.float32) / m) # (B, 1, N1)
+    return (C1[None] * tw).astype(CDTYPE) # (B, N1, N1)
+
+    
+
 
 
 # ─── top-level entry point ─────────────────────────────────────────────────
 _VARIANTS = {
     'baseline':           small_dft_baseline,
     'no_transpose':       small_dft_no_transpose,
-    'fused':              small_dft_fused,
-    'fused_no_transpose': small_dft_fused_no_transpose,
+    'twiddle_fused':              smalll_dft_twiddle_fused,
+    'twiddle_fused_no_transpose': smalll_dft_twiddle_fused_no_transpose,
 }
 
 
