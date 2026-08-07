@@ -15,23 +15,26 @@ from jax.experimental.pallas import tpu as pltpu
 
 B = 128
 F = jnp.float32
-DT = 4  # bytes per f32 component
+BF = jnp.bfloat16
+ACC = jnp.float32  # matmuls always accumulate in f32, whatever the operand dtype
+_BYTES = {F: 4, BF: 2}  # bytes per real component (f32 -> complex64, bf16 -> "complex32")
 
 # K-grid is embarrassingly parallel (each K-tile is an independent transform); telling
 # Mosaic so lets it pipeline the tiles — overlap tile k+1's HBM read with tile k's compute.
 _PARALLEL = pltpu.CompilerParams(dimension_semantics=("parallel",))
 
-_EIN = lambda A, x: jnp.einsum('br,rck->bck', A, x)  # radix-B matmul over axis 0 (3-D)
-_MAT = lambda A, x: A @ x  # leaf matmul (2-D)
+# radix-B matmul (3-D) / leaf matmul (2-D). operand dtype = the caller's; accumulate f32.
+_EIN = lambda A, x: jnp.einsum('br,rck->bck', A, x, preferred_element_type=ACC)
+_MAT = lambda A, x: jnp.matmul(A, x, preferred_element_type=ACC)
 
 
-def _CB_reim(m):
-    """radix-m DFT matrix as (Cr=cos, Ci=sin, Cs=Cr+Ci) f32 — built in VMEM, no HBM.
+def _CB_reim(m, dt=F):
+    """radix-m DFT matrix as (Cr=cos, Ci=sin, Cs=Cr+Ci) in dtype `dt` — built in VMEM.
     Cs is precomputed for the Karatsuba complex matmul."""
     k = jnp.arange(m)
     ang = -2 * jnp.pi * jnp.outer(k, k) / m
-    Cr, Ci = jnp.cos(ang).astype(F), jnp.sin(ang).astype(F)
-    return Cr, Ci, Cr + Ci
+    cr, ci = jnp.cos(ang), jnp.sin(ang)
+    return cr.astype(dt), ci.astype(dt), (cr + ci).astype(dt)
 
 
 def _karatsuba(mm, Cr, Ci, Cs, xr, xi):
@@ -41,86 +44,96 @@ def _karatsuba(mm, Cr, Ci, Cs, xr, xi):
     return m1 - m2, m3 - m1 - m2  # real = m1-m2,  imag = m3-m1-m2
 
 
-def _fft_reim_real(xr, N, half=False):
-    """Radix-B FFT of REAL columns xr (N, batch), carried as real/imag f32.
+def _fft_reim_real(xr, N, half=False, dt=F):
+    """Radix-B FFT of REAL columns xr (N, batch), carried as real/imag in dtype `dt`.
     Peels one radix-B stage per iteration (length /B, batch *B), then a leaf DFT, then a
-    reshape-only digit-reversal rebuild.  Flop savings: xi=0 first stage (2 matmuls) and
-    Karatsuba elsewhere (3 matmuls).  half=True -> first N//2 bins (Hermitian rfft)."""
-    cr, ci, m, batch, stages, first = xr, None, N, xr.shape[1], [], True
+    reshape-only digit-reversal rebuild."""
+    cr, ci, m, batch, stages, first = xr.astype(dt), None, N, xr.shape[1], [], True
+
     while m > B and m % B == 0:
         N1 = m // B
-        Cr, Ci, Cs = _CB_reim(B)
+        Cr, Ci, Cs = _CB_reim(B, dt)
+
         if first:  # xi == 0: 2 matmuls
             x3 = cr.reshape(B, N1, batch)
             yr, yi, first = _EIN(Cr, x3), _EIN(Ci, x3), False
         else:  # Karatsuba: 3 matmuls
             yr, yi = _karatsuba(_EIN, Cr, Ci, Cs,
                 cr.reshape(B, N1, batch), ci.reshape(B, N1, batch))
+
         c = jnp.arange(N1)[None, :]
         ang = (-2 * jnp.pi * (jnp.arange(B)[:, None] * c) / m).astype(F)  # twiddle W_m^(b*c)
-        wr, wi = jnp.cos(ang)[:, :, None], jnp.sin(ang)[:, :, None]
-        cr = (yr * wr - yi * wi).transpose(1, 0, 2).reshape(N1, B * batch)  # twiddle + fold
-        ci = (yr * wi + yi * wr).transpose(1, 0, 2).reshape(N1, B * batch)
+
+        wr, wi = jnp.cos(ang)[:, :, None], jnp.sin(ang)[:, :, None]  # f32 twiddle on f32 yr,yi
+        cr = (yr * wr - yi * wi).transpose(1, 0, 2).reshape(N1, B * batch).astype(dt)  # store dt
+        ci = (yr * wi + yi * wr).transpose(1, 0, 2).reshape(N1, B * batch).astype(dt)
+
         stages.append((B, N1))
         m, batch = N1, B * batch
 
-    Cr, Ci, Cs = _CB_reim(m)  # leaf: 2 matmuls (real) or 3 (Karatsuba)
+    Cr, Ci, Cs = _CB_reim(m, dt)  # leaf: 2 matmuls (real) or 3 (Karatsuba)
     nr, ni = (_MAT(Cr, cr), _MAT(Ci, cr)) if first else _karatsuba(_MAT, Cr, Ci, Cs, cr, ci)
     lr, li, length = nr, ni, m
+
     for (Bi, _n) in reversed(stages):  # digit-reversal (reshape only)
         lr = lr.reshape(length, Bi, -1).reshape(length * Bi, -1)
         li = li.reshape(length, Bi, -1).reshape(length * Bi, -1)
         length *= Bi
-    return (lr[:N // 2], li[:N // 2]) if half else (lr, li)
+
+    lr, li = (lr[:N // 2], li[:N // 2]) if half else (lr, li)
+    return lr.astype(dt), li.astype(dt)  # output in dt ("complex32" if bf16)
 
 
-def _kernel(xr_ref, yr_ref, yi_ref, *, N, half):
+def _kernel(xr_ref, yr_ref, yi_ref, *, N, half, dt):
     """Kernel body: whole FFT of one K_TILE-column block, entirely in VMEM."""
-    yr_ref[...], yi_ref[...] = _fft_reim_real(xr_ref[...], N, half)
+    yr_ref[...], yi_ref[...] = _fft_reim_real(xr_ref[...], N, half, dt)
 
 
-def _pallas(xr, K_TILE, interpret, half):
-    """Shared pallas_call: grid over K; output rows = N//2 (half) or N (full)."""
+def _pallas(xr, K_TILE, interpret, half, dt):
+    """Shared pallas_call: grid over K; output rows = N//2 (half) or N (full), dtype dt."""
     N, K = xr.shape
     rows = N // 2 if half else N
     return pl.pallas_call(
-        partial(_kernel, N=N, half=half),
+        partial(_kernel, N=N, half=half, dt=dt),
         grid=(K // K_TILE,),
         in_specs=[pl.BlockSpec((N, K_TILE), lambda k: (0, k))],
         out_specs=[pl.BlockSpec((rows, K_TILE), lambda k: (0, k))] * 2,
-        out_shape=[jax.ShapeDtypeStruct((rows, K), F)] * 2,
+        out_shape=[jax.ShapeDtypeStruct((rows, K), dt)] * 2,
         compiler_params=_PARALLEL,
         interpret=interpret,
     )(xr)
 
 
-def pallas_full(xr, K_TILE=128, interpret=True):
-    """Real (N, K) -> FULL spectrum (yr, yi), each (N, K)  — all N bins."""
-    return _pallas(xr, K_TILE, interpret, half=False)
+def pallas_full(xr, K_TILE=128, interpret=True, dt=F):
+    """Real (N, K) -> FULL spectrum (yr, yi), each (N, K)  — all N bins.
+    dt=BF gives the bf16 'complex32' variant (half the bytes, ~5e-3 error)."""
+    return _pallas(xr, K_TILE, interpret, half=False, dt=dt)
 
 
-def pallas_half(xr, K_TILE=128, interpret=True):
-    """Real (N, K) -> HALF spectrum (yr, yi), each (N//2, K)  — Hermitian rfft."""
-    return _pallas(xr, K_TILE, interpret, half=True)
+def pallas_half(xr, K_TILE=128, interpret=True, dt=F):
+    """Real (N, K) -> HALF spectrum (yr, yi), each (N//2, K)  — Hermitian rfft.
+    dt=BF gives the bf16 'complex32' variant (half the bytes, ~5e-3 error)."""
+    return _pallas(xr, K_TILE, interpret, half=True, dt=dt)
 
 
-def pallas_hbm_bytes(N, K, half=False):
+def pallas_hbm_bytes(N, K, half=False, dt=F):
     """Analytical HBM traffic (VMEM-resident): read input once + write output once.
-    Intermediates never touch HBM by design.  half writes only N//2 rows."""
+    Intermediates never touch HBM by design.  half writes only N//2 rows.
+    dt sets bytes/component: f32 -> 4 (complex64), bf16 -> 2 ('complex32')."""
+    dtb = _BYTES[dt]
     rows = N // 2 if half else N
-    return N * K * DT + 2 * rows * K * DT  # read xr + write (yr, yi)
+    return N * K * dtb + 2 * rows * K * dtb  # read xr + write (yr, yi)
 
 
-# ─── a real Trick-B rfft with a SELF-MADE row reversal ──────────────────────
-# Mosaic has no rev/gather, but a row reversal is O(N) data movement, done as: reverse
-# within each 128-block (one fixed 128x128 anti-identity matmul, batched) + reverse the
-# block ORDER (a small nb x nb matmul), nb = M/128.  The Hermitian mirror conj(Z[(h-k)%h])
-# is then roll(reverse(Z), 1) — and pltpu.roll lowers.  This enables the genuine Trick B
-# (even/odd -> HALF-length FFT -> mirror -> twist), which halves the FFT compute.
-# VERDICT (see bench): lowers, correct, and the O(N) mirror is cheap enough that Trick B
-# BEATS pallas_half at large N (~0.76x flops at N=16384); roughly ties at small N.
-# (The nb x nb block-order reverse is O(nb^2); fine while nb<=128 i.e. N<=~16384 — the
-# VMEM-resident regime.  Larger N would need to recurse the block reversal too.)
+def jax_rfft(xr, half=True, dt=F):
+    """Pure-JAX (no Pallas) real FFT via the SAME real/imag path as the kernel — same `dt`
+    option (F -> complex64, BF -> bf16 'complex32').  Unlike the kernel this is plain XLA,
+    so stages round-trip HBM; but it lets the bf16 win be used/measured in the JAX path.
+    Real (N, K) -> (yr, yi).  half=True keeps the first N//2 bins."""
+    return _fft_reim_real(xr, xr.shape[0], half=half, dt=dt)
+
+
+# Row reversal
 def _rev(x):
     """Reverse the rows of x (M, K), M a multiple of 128, in O(M*128) via block matmuls."""
     M, K = x.shape
@@ -133,23 +146,29 @@ def _rev(x):
         Jn = (n[None, :] == (nb - 1 - n[:, None])).astype(F)  # nb x nb anti-identity
         x3 = jnp.einsum('nm,mck->nck', Jn, x3)  # reverse block order
     return x3.reshape(M, K)
+
 def _fft_c(cr, ci, N):
     """General complex radix-B FFT (Karatsuba on every stage), full N-bin output."""
     m, batch, stages = N, cr.shape[1], []
+
     while m > B and m % B == 0:
         N1 = m // B
         Cr, Ci, Cs = _CB_reim(B)
         yr, yi = _karatsuba(_EIN, Cr, Ci, Cs, cr.reshape(B, N1, batch), ci.reshape(B, N1, batch))
         c = jnp.arange(N1)[None, :]
         ang = (-2 * jnp.pi * (jnp.arange(B)[:, None] * c) / m).astype(F)
+
         wr, wi = jnp.cos(ang)[:, :, None], jnp.sin(ang)[:, :, None]
         cr = (yr * wr - yi * wi).transpose(1, 0, 2).reshape(N1, B * batch)
         ci = (yr * wi + yi * wr).transpose(1, 0, 2).reshape(N1, B * batch)
+
         stages.append((B, N1))
         m, batch = N1, B * batch
+
     Cr, Ci, Cs = _CB_reim(m)
     lr, li = _karatsuba(_MAT, Cr, Ci, Cs, cr, ci)
     length = m
+
     for (Bi, _n) in reversed(stages):
         lr = lr.reshape(length, Bi, -1).reshape(length * Bi, -1)
         li = li.reshape(length, Bi, -1).reshape(length * Bi, -1)
@@ -177,9 +196,11 @@ def _trickB_kernel(xr_ref, yr_ref, yi_ref, *, N):
     yr_ref[...], yi_ref[...] = _trickB(xr_ref[...], N)
 
 
-def pallas_trickB(xr, K_TILE=128, interpret=True):
+def pallas_trickB(xr, K_TILE=128, interpret=True, dt=F):
     """Real (N, K) -> HALF spectrum via Trick B + self-made reversal.  See note above:
-    correct and lowers, but the O(N^2) mirror makes it slower than pallas_half."""
+    correct and lowers, but the O(N^2) mirror makes it slower than pallas_half.
+    (dt accepted for a uniform interface; the Trick-B path runs in f32.)"""
+    xr = xr.astype(F)
     N, K = xr.shape
     h = N // 2
     return pl.pallas_call(

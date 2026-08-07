@@ -29,20 +29,25 @@ def fft_iter(x):
     # forward sweep: one radix-B stage per iteration
     while m > B and m % B == 0:
         N1 = m // B
-        cur = cur.reshape(B, N1, batch) # split length -> (r, c, batch)
+        # reshape
+        cur = cur.reshape(B, N1, batch)
+        # col radix-B DFT over r (axis 0)
         cur = jnp.einsum('br,rck->bck', dft_matrix(B), cur,
-                         preferred_element_type=CDTYPE)  # radix-B DFT over r (axis 0)
+                         preferred_element_type=CDTYPE)
         r = jnp.arange(B)[:, None]
         c = jnp.arange(N1)[None, :]
+        # multiply with twiddle factors
         cur = cur * jnp.exp(-2j * jnp.pi * (r * c) / m).astype(CDTYPE)[:, :, None]  # twiddle
+        # tranpose
         cur = cur.transpose(1, 0, 2).reshape(N1, B * batch)   # rotate c to axis0; fold b in
         stages.append((B, N1))
+        # params for next stage
         m, batch = N1, B * batch
 
     # leaf: one direct DFT over the remaining axis 0
     cur = dft_matrix(m) @ cur   # (m, batch)
 
-    # rebuild: undo the folds in reverse order (the digit-reversal)
+    # rebuild: undo the folds in reverse order
     out, length = cur, m
     for (Bi, _N1i) in reversed(stages):
         out = out.reshape(length, Bi, -1).reshape(length * Bi, -1)   # merge b_i back (outer)

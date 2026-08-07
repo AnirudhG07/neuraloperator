@@ -75,7 +75,7 @@ def rfft_trickB(xr, eng):
     N, K = xr.shape
     h = N // 2
     z = (xr[0::2] + 1j * xr[1::2]).astype(C)         # (h, K)
-    Z = eng(z)                # K HALF-length FFTs
+    Z = eng(z) # K HALF-length FFTs
     M = _mirror(Z) # M = conj(Z[(N-k) mod N]) along axis 0
     E = 0.5 * (Z + M)
     O = -0.5j * (Z - M)
