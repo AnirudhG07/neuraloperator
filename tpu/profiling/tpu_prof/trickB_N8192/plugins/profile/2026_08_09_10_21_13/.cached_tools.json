@@ -1,0 +1,18 @@
+{
+  "files": {
+    "2ac09b7aff4f.xplane.pb": "1786270873-219871"
+  },
+  "tools": [
+    "overview_page",
+    "trace_viewer@",
+    "graph_viewer",
+    "op_profile",
+    "input_pipeline_analyzer",
+    "memory_profile",
+    "memory_viewer",
+    "roofline_model",
+    "framework_op_stats",
+    "hlo_stats"
+  ],
+  "version": 1
+}

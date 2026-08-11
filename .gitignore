@@ -80,3 +80,8 @@ target/
 #Ipython Notebook
 .ipynb_checkpoints
 /tpu/tpu_profile/plugins/profile/2026_07_27_16_40_59
+
+# large datasets (>50MB) — kept locally, not committed
+neuralop/data/datasets/data/darcy_train_32.pt
+neuralop/data/datasets/data/darcy_32.tgz
+neuralop/datasets/data/nsforcing_128.tgz

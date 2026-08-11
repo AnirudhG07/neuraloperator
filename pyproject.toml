@@ -43,6 +43,13 @@ explicit = true
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "nbclient>=0.10.4",
+    "nbformat>=5.10.4",
+]
+
 [tool.setuptools.packages.find]
 include = [
     "neuralop",

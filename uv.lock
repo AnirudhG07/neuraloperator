@@ -931,6 +931,13 @@ doc = [
     { name = "torchtnt" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+    { name = "nbclient" },
+    { name = "nbformat" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'all'" },
@@ -978,6 +985,13 @@ requires-dist = [
     { name = "zencfg", specifier = ">=0.3.0" },
 ]
 provides-extras = ["dev", "doc", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ipykernel", specifier = ">=7.2.0" },
+    { name = "nbclient", specifier = ">=0.10.4" },
+    { name = "nbformat", specifier = ">=5.10.4" },
+]
 
 [[package]]
 name = "numpy"
