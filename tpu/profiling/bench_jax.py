@@ -46,7 +46,10 @@ from tpu.fft1d.jax_fft import (
     rfft_trickB,
 )
 from tpu.fft1d.pallas_fft import pallas_full, pallas_half, pallas_trickB
+from tpu.fft2d.jax_fft import jax_rfft2, rfft2_partial
+from tpu.fft2d.pallas_fft import pallas_rfft2
 from tpu.fft_core import BF, F
+from tpu.jnp_rfft_hlo import rfft_hlo  # our reconstruction of jnp.rfft's TPU four-step
 
 C = jnp.complex64
 K_TILE = 128  # Pallas block width (must be a multiple of 128)
@@ -58,39 +61,64 @@ TIME_REPS = 15  # median over this many blocked runs
 
 
 # ─── engine registry ────────────────────────────────────────────────────────
-def _jax(fn):
-    return {"pallas": False, "fn": fn}
+def _e(fn, dim=1, dt=F):
+    """Engine spec: fn(x)->output, dim 1|2 (sets input (N,K) vs (N,N,K)), input dtype `dt`."""
+    return {"fn": fn, "dim": dim, "dt": dt}
 
 
-def _pal(kernel, half, dt=F):
-    return {"pallas": True, "kernel": kernel, "half": half, "dt": dt}
+def _rfft_hlo_auto(xr):
+    """rfft_hlo four-step, auto-factored N = 128 x (N//128) (jnp.rfft's TPU factorization)."""
+    N = xr.shape[0]
+    N1 = 128 if N % 128 == 0 else N
+    return rfft_hlo(xr, N1, N // N1)
 
 
+_cfft = {"fft-iter": fft_iter, "fft-recur": fft_recur,          # complex engines the tricks wrap
+         "jnp-fft": lambda z: jnp.fft.fft(z, axis=0)}
+
+# NAME = {who}_{dim}_{compute}_{method}[_{trick}]  — one field per axis:
+#   who us|jnp ; dim 1D|2D ; compute fft(full)|rfft(real-half)
+#   method  fft-iter|fft-recur|jnp-fft (complex engines tricks wrap) ; reim|four-step|pallas|
+#           direct-int8|partial (direct real) ; trailing -bf16 = bf16 ; trick trickA|trickB
 ENGINES = {
-    "jnp.fft":     _jax(lambda xr: jnp.fft.fft(xr.astype(C), axis=0)),  # full
-    "jnp.rfft":    _jax(lambda xr: jnp.fft.rfft(xr, axis=0)),  # half, native
-    "fft_recur":   _jax(lambda xr: fft_recur(xr.astype(C))),  # recursive radix-B baseline
-    "fft_iter":    _jax(lambda xr: fft_iter(xr.astype(C))),  # full
-    "trickA":      _jax(lambda xr: rfft_trickA(xr, fft_iter)),  # half, on fft_iter
-    "trickB":      _jax(lambda xr: rfft_trickB(xr, fft_iter)),  # half, on fft_iter
-    "jax_half":      _jax(lambda xr: jax_rfft(xr, True, F)),  # pure-JAX real/imag, f32
-    "jax_half_bf16": _jax(lambda xr: jax_rfft(xr.astype(BF), True, BF)),  # pure-JAX, bf16
-    "jax_half_int8": _jax(lambda xr: jax_rfft_int8(xr, True)),  # int8 direct DFT, int32 acc
-    "pallas_full":     _pal(pallas_full, half=False),  # full, VMEM
-    "pallas_half":     _pal(pallas_half, half=True),  # half via output truncation, VMEM
-    "pallas_half_bf16": _pal(pallas_half, half=True, dt=BF),  # bf16 'complex32'
-    "pallas_trickB":   _pal(pallas_trickB, half=True),  # half via self-made reversal
+    # -- 1D full complex FFT --
+    "us_1D_fft_fft-iter":       _e(lambda xr: fft_iter(xr.astype(C))),
+    "us_1D_fft_fft-recur":      _e(lambda xr: fft_recur(xr.astype(C))),
+    "us_1D_fft_pallas":         _e(lambda xr: pallas_full(xr, K_TILE, _ITP, F)),
+    "jnp_1D_fft_jnp-fft":       _e(lambda xr: jnp.fft.fft(xr.astype(C), axis=0)),
+    # -- 1D rfft, direct (no trick) --
+    "us_1D_rfft_reim":          _e(lambda xr: jax_rfft(xr, True, F)),
+    "us_1D_rfft_reim-bf16":     _e(lambda xr: jax_rfft(xr.astype(BF), True, BF), dt=BF),
+    "us_1D_rfft_direct-int8":   _e(lambda xr: jax_rfft_int8(xr, True)),
+    "us_1D_rfft_four-step":     _e(_rfft_hlo_auto),
+    "us_1D_rfft_pallas":        _e(lambda xr: pallas_half(xr, K_TILE, _ITP, F)),
+    "us_1D_rfft_pallas-bf16":   _e(lambda xr: pallas_half(xr, K_TILE, _ITP, BF), dt=BF),
+    "us_1D_rfft_pallas_trickB": _e(lambda xr: pallas_trickB(xr, K_TILE, _ITP, F)),
+    "jnp_1D_rfft_jnp-fft":      _e(lambda xr: jnp.fft.rfft(xr, axis=0)),
+    # -- 2D rfft / fft --
+    "us_2D_rfft_reim":          _e(jax_rfft2, dim=2),
+    "us_2D_rfft_partial":       _e(lambda xr: rfft2_partial(xr, 0.5), dim=2),
+    "us_2D_rfft_pallas":        _e(lambda xr: pallas_rfft2(xr, K_TILE, _ITP, F), dim=2),
+    "jnp_2D_rfft_jnp-fft":      _e(lambda xr: jnp.fft.rfft2(xr, axes=(0, 1)), dim=2),
+    "jnp_2D_fft_jnp-fft":       _e(lambda xr: jnp.fft.fft2(xr.astype(C), axes=(0, 1)), dim=2),
 }
+for _m, _eng in _cfft.items():  # 1D rfft tricks = {trickA,trickB} x {fft-iter,fft-recur,jnp-fft}
+    _who = "jnp" if _m == "jnp-fft" else "us"
+    ENGINES[f"{_who}_1D_rfft_{_m}_trickA"] = _e(lambda xr, e=_eng: rfft_trickA(xr, e))
+    ENGINES[f"{_who}_1D_rfft_{_m}_trickB"] = _e(lambda xr, e=_eng: rfft_trickB(xr, e))
 
-# Named line-ups. The first entry is the baseline (x = 1.00).
+
+def _pick(*subs):  # engine names containing ALL substrings (preserves registry order)
+    return [n for n in ENGINES if all(s in n for s in subs)]
+
+
+# Named line-ups. First entry = baseline (x = 1.00).  Keep a case dim-homogeneous.
 CASES = {
-    "full":             ["jnp.fft", "fft_recur", "fft_iter", "pallas_full"],
-    "rfft":             ["jnp.rfft", "trickA", "trickB", "pallas_half"],
-    "pallas_vs_native": ["jnp.rfft", "pallas_half"],
-    "pallas_rfft":      ["pallas_half", "pallas_trickB"],
-    "bf16":             ["pallas_half", "pallas_half_bf16", "jax_half", "jax_half_bf16"],
-    # datatype comparison: f32 vs bf16 ('complex32') vs int8 ('complex16') on the JAX path
-    "dtype":            ["jax_half", "jax_half_bf16", "jax_half_int8"],
+    "all_1D":    _pick("_1D_"),
+    "all_2D":    _pick("_2D_"),
+    "rfft_1D":   _pick("_1D_rfft_"),
+    "tricks_1D": _pick("_1D_rfft_", "trick"),
+    "dtype_1D":  ["us_1D_rfft_reim", "us_1D_rfft_reim-bf16", "us_1D_rfft_direct-int8"],
 }
 
 
@@ -114,12 +142,48 @@ def _ft(t):
     return f"{t:.2f}s"
 
 
+def _nl(N):
+    """Label for a size: 1D int 1024 -> '1024';  2D (128,128) -> '128x128'  (folder/CSV/table)."""
+    return str(N) if isinstance(N, int) else "x".join(str(int(x)) for x in N)
+
+
+def _size(label):
+    """Numeric size from a label for sorting:  '128x128' -> 16384,  '1024' -> 1024."""
+    return int(np.prod([int(x) for x in str(label).split("x")]))
+
+
+def _is_nlabel(s):
+    """True for a valid N-label folder suffix: '1024' or '128x128' (all parts are digits)."""
+    parts = s.split("x")
+    return len(parts) in (1, 2) and all(p.isdigit() for p in parts)
+
+
 def _build(spec, xj):
-    """(jitted callable, input array) for an engine — input cast to the kernel's dtype."""
-    if spec["pallas"]:
-        kern, dt = spec["kernel"], spec["dt"]
-        return jax.jit(lambda x, kern=kern, dt=dt: kern(x, K_TILE, _ITP, dt)), xj.astype(dt)
-    return jax.jit(spec["fn"]), xj
+    """(jitted callable, input cast to the engine's dtype)."""
+    return jax.jit(spec["fn"]), xj.astype(spec["dt"])
+
+
+def _make_input(N, K, dim):
+    """(input array, numpy reference spectrum).  K = batch (= samples*channels for an FNO).
+      1D: N is a length -> input (N, K), ref = full 1D spectrum.
+      2D: N is (N1, N2) -> input (N1, N2, K), ref = full 2D spectrum.  int N means square NxN."""
+    if dim == 1:
+        xr = np.random.randn(N, K).astype(np.float32)
+        return jnp.asarray(xr), np.fft.fft(xr, axis=0)
+    N1, N2 = (N, N) if isinstance(N, int) else N          # both sides given (or square)
+    xr = np.random.randn(N1, N2, K).astype(np.float32)
+    ref = np.stack([np.fft.fft2(xr[:, :, k]) for k in range(K)], axis=-1)
+    return jnp.asarray(xr), ref
+
+
+def _relerr_dim(out, ref, dim):
+    """rel_err vs numpy; 2D compares the low-mode corner [0:8,0:8] (convention-independent —
+    every rfft2 layout shares the low-frequency corner regardless of which axis it halves)."""
+    g = _to_cplx(out)
+    if dim == 1:
+        return _relerr(g, ref[:g.shape[0]])
+    m = min(8, g.shape[0], g.shape[1])
+    return float(np.max(np.abs(g[:m, :m] - ref[:m, :m])) / np.max(np.abs(ref[:m, :m])))
 
 
 def _times(fn, x, reps=TIME_REPS):
@@ -160,29 +224,31 @@ def compare(engines=None, case=None, Ns=(256, 1024, 16384), K=256, baseline=None
     print(f"  time = median of {TIME_REPS} runs;  cv% = std/mean (run-to-run noise);  "
           f"min = best run")
     print("=" * 78)
-    print(f"  {'N':>8} {'engine':>14} {'rel_err':>10} {'time':>10} {'x':>6} "
+    print(f"  {'N':>8} {'engine':>26} {'rel_err':>10} {'time':>10} {'x':>6} "
           f"{'cv%':>6} {'min':>10}")
     for N in Ns:
-        xr = np.random.randn(N, K).astype(np.float32)
-        ref = np.fft.fft(xr, axis=0)  # full reference; slice per output rows
-        xj = jnp.asarray(xr)
+        nl = _nl(N)
+        inp = {}  # dim -> (xj, ref), built lazily
         res = {}
         for n in names:
+            d = ENGINES[n]["dim"]
+            if d not in inp:
+                inp[d] = _make_input(N, K, d)
+            xj, ref = inp[d]
             try:
                 fn, x = _build(ENGINES[n], xj)
-                res[n] = (fn(x), _times(fn, x))
+                res[n] = (fn(x), _times(fn, x), ref, d)
             except Exception as e:  # e.g. VMEM OOM at large N — don't kill the run
-                res[n] = ("ERR", repr(e)[:44])
+                res[n] = ("ERR", repr(e)[:44], None, 0)
         m0 = _median(res[baseline][1]) if res[baseline][0] != "ERR" else 1.0
         for n in names:
-            out, ts = res[n]
+            out, ts, ref, d = res[n]
             if out == "ERR":
-                print(f"  {N:>8,} {n:>14}   ERR: {ts}")
+                print(f"  {nl:>8} {n:>26}   ERR: {ts}")
                 continue
-            rows = (out[0] if isinstance(out, tuple) else out).shape[0]
-            rel = _relerr(out, ref[:rows])
+            rel = _relerr_dim(out, ref, d)
             med = _median(ts)
-            print(f"  {N:>8,} {n:>14} {rel:>10.1e} {_ft(med):>10} {med/m0:>5.2f}x "
+            print(f"  {nl:>8} {n:>26} {rel:>10.1e} {_ft(med):>10} {med/m0:>5.2f}x "
                   f"{_cv(ts):>5.1f}% {_ft(ts[0]):>10}")
         print()
 
@@ -222,20 +288,24 @@ def profile(engines=None, case=None, Ns=(1024,), K=256, logdir="/tmp/tpu_prof", 
 
     written = []
     for N in Ns:
-        xj = jnp.asarray(np.random.randn(N, K).astype(np.float32))
+        nl = _nl(N)
+        inp = {}  # dim -> input array (1D (N,K) or 2D (N1,N2,K))
         for n in names:
+            d = ENGINES[n]["dim"]
+            if d not in inp:
+                inp[d] = _make_input(N, K, d)[0]
             try:
-                fn, x = _build(ENGINES[n], xj)
+                fn, x = _build(ENGINES[n], inp[d])
                 jax.block_until_ready(fn(x))  # warmup / compile OUTSIDE the trace
             except Exception as e:
-                print(f"  skip {n:>14} N={N:<7} : {repr(e)[:55]}")
+                print(f"  skip {n:>26} N={nl:<9} : {repr(e)[:55]}")
                 continue
-            sub = os.path.join(logdir, f"{n}_N{N}")
+            sub = os.path.join(logdir, f"{n}_N{nl}")
             with jax.profiler.trace(sub):
                 for _ in range(reps):
                     jax.block_until_ready(fn(x))
             written.append(sub)
-            print(f"  captured {n:>14} N={N:<7} -> {sub}")
+            print(f"  captured {n:>26} N={nl:<9} -> {sub}")
 
     files = _profile_files(logdir)
     print(f"\n{len(written)} runs, {len(files)} profile files under {logdir}")
@@ -431,7 +501,7 @@ def _read_timings(csv):
             if len(row) < 4:
                 continue
             try:
-                out.setdefault((row[0], int(row[1])), []).append(float(row[3]))
+                out.setdefault((row[0], row[1]), []).append(float(row[3]))  # N kept as label ("1024"/"128x128")
             except ValueError:
                 continue
     for k in out:
@@ -451,13 +521,13 @@ def report(logdir="tpu/profiling/tpu_prof", timings="tpu/profiling/timings.csv",
     data = {}  # (engine, N) -> _xplane_stats
     for f in (sorted(os.listdir(logdir)) if os.path.isdir(logdir) else []):
         p = os.path.join(logdir, f)
-        eng, sep, ns = f.rpartition("_N")
-        if not (os.path.isdir(p) and sep and ns.isdigit()):
+        eng, sep, ns = f.rpartition("_N")  # ns = "1024" (1D) or "128x128" (2D)
+        if not (os.path.isdir(p) and sep and _is_nlabel(ns)):
             continue
         m = _xplane_stats(p)
         if m:
-            data[(eng, int(ns))] = m
-    Ns = sorted({N for (_e, N) in data})
+            data[(eng, ns)] = m
+    Ns = sorted({N for (_e, N) in data}, key=_size)
     L = [f"# TPU FFT profiling — {logdir}/ (xprof /device:TPU:0) + {os.path.basename(timings)}\n"]
 
     L += ["## methodology",
@@ -529,18 +599,22 @@ def timings(engines=None, case=None, Ns=(1024,), K=256, reps=15,
     names = engines or (CASES[case] if case else list(ENGINES))
     rows = []
     for N in Ns:
-        xj = jnp.asarray(np.random.randn(N, K).astype(np.float32))
+        nl = _nl(N)
+        inp = {}  # dim -> input array
         for n in names:
+            d = ENGINES[n]["dim"]
+            if d not in inp:
+                inp[d] = _make_input(N, K, d)[0]
             try:
-                fn, x = _build(ENGINES[n], xj)
+                fn, x = _build(ENGINES[n], inp[d])
                 jax.block_until_ready(fn(x))  # warmup / compile (not recorded)
             except Exception as e:
-                print(f"  skip {n} N={N}: {repr(e)[:55]}. Error: {e}")
+                print(f"  skip {n} N={nl}: {repr(e)[:55]}. Error: {e}")
                 continue
             for r in range(reps):
                 t0 = time.perf_counter()
                 jax.block_until_ready(fn(x))
-                rows.append((n, N, r, time.perf_counter() - t0))
+                rows.append((n, nl, r, time.perf_counter() - t0))
 
     with open(out, "w") as fh:
         fh.write("engine,N,run,seconds\n")
@@ -584,15 +658,15 @@ def timings(engines=None, case=None, Ns=(1024,), K=256, reps=15,
 
 
 if __name__ == "__main__":
-    # correctness + real time (median + cv% noise)
-    Ns = (256, 1024, 4096, 8192, 16384)
-    compare(case="rfft", Ns=Ns)
-    compare(case="bf16", Ns=Ns)
+    # ALL permutations, on TPU.  1D swept over lengths, 2D over (square) grid sizes.
+    LOGDIR, TCSV, MD = "/tmp/tpu_prof", "/tmp/timings.csv", "/tmp/PROFILING.md"
+    NS_1D = (256, 1024, 4096, 8192, 16384)
+    NS_2D = ((64, 64), (128, 128), (256, 256))  # give BOTH sides (N1, N2); non-square ok e.g. (17, 16)
 
-    # every run's wall-clock -> CSV + noise plot (download to inspect jitter)
-    timings(case="rfft", Ns=Ns, reps=15, out="/tmp/timings.csv")
-
-    # real measured device profiles — one xprof capture per (engine, N)
-    runs = profile(case="rfft", Ns=Ns)
-    for r in runs:
-        explain(r)  # plain-terms read of where the device time went
+    compare(case="all_1D", Ns=NS_1D)                 # correctness + wall-clock, every 1D engine
+    compare(case="all_2D", Ns=NS_2D)                 # every 2D engine
+    timings(case="all_1D", Ns=NS_1D, reps=15, out=TCSV)
+    runs  = profile(case="all_1D", Ns=NS_1D, logdir=LOGDIR)   # xprof device capture
+    runs += profile(case="all_2D", Ns=NS_2D, logdir=LOGDIR)
+    report(logdir=LOGDIR, timings=TCSV, out=MD)      # ONE combined PROFILING.md (sorted by N, ★)
+    print(f"\ndownload:  !zip -r {LOGDIR}.zip {LOGDIR}   (send me the zip + {MD})")
