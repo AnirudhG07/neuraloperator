@@ -85,3 +85,5 @@ target/
 neuralop/data/datasets/data/darcy_train_32.pt
 neuralop/data/datasets/data/darcy_32.tgz
 neuralop/datasets/data/nsforcing_128.tgz
+/tpu/profiling/tpu_prof
+/tpu/traces**

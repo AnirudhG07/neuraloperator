@@ -23,6 +23,7 @@ An "engine" turns a real (N, K) input into a spectrum; a "case" is a named list 
 
 Run on a Colab TPU:  python -m tpu.profiling.bench_jax   (or import and call).
 """
+import contextlib
 import glob
 import os
 import sys
@@ -38,17 +39,18 @@ import jax.numpy as jnp
 import numpy as np
 
 from tpu.fft1d.jax_fft import (
-    fft_iter,
-    fft_recur,
+    fft_reim,
     jax_rfft,
     jax_rfft_int8,
     rfft_trickA,
+    rfft_trickA_reim,
     rfft_trickB,
+    rfft_trickB_reim,
 )
 from tpu.fft1d.pallas_fft import pallas_full, pallas_half, pallas_trickB
 from tpu.fft2d.jax_fft import jax_rfft2, rfft2_partial
 from tpu.fft2d.pallas_fft import pallas_rfft2
-from tpu.fft_core import BF, F
+from tpu.fft_core import BF, F, I8
 from tpu.jnp_rfft_hlo import rfft_hlo  # our reconstruction of jnp.rfft's TPU four-step
 
 C = jnp.complex64
@@ -73,28 +75,32 @@ def _rfft_hlo_auto(xr):
     return rfft_hlo(xr, N1, N // N1)
 
 
-_cfft = {"fft-iter": fft_iter, "fft-recur": fft_recur,          # complex engines the tricks wrap
-         "jnp-fft": lambda z: jnp.fft.fft(z, axis=0)}
+# The tricks (pack-2-reals / even-odd) wrapped around a complex FFT.  Our own tricks are the
+# real/imag `reimtrick_*` engines (no complex64); only jnp's reference trick stays complex64.
+_cfft = {"jnp-fft": lambda z: jnp.fft.fft(z, axis=0)}
 
 # NAME = {who}_{dim}_{compute}_{method}[_{trick}]  — one field per axis:
 #   who us|jnp ; dim 1D|2D ; compute fft(full)|rfft(real-half)
-#   method  fft-iter|fft-recur|jnp-fft (complex engines tricks wrap) ; reim|four-step|pallas|
+#   method  fft-iter|fft-recur|jnp-fft (complex engines tricks wrap) ; reim|conv-hlo|pallas|
 #           direct-int8|partial (direct real) ; trailing -bf16 = bf16 ; trick trickA|trickB
 ENGINES = {
-    # -- 1D full complex FFT --
-    "us_1D_fft_fft-iter":       _e(lambda xr: fft_iter(xr.astype(C))),
-    "us_1D_fft_fft-recur":      _e(lambda xr: fft_recur(xr.astype(C))),
+    # -- 1D full complex FFT (ours carry real/imag -> no complex64) --
+    "us_1D_fft_reim":           _e(fft_reim),
     "us_1D_fft_pallas":         _e(lambda xr: pallas_full(xr, K_TILE, _ITP, F)),
-    "jnp_1D_fft_jnp-fft":       _e(lambda xr: jnp.fft.fft(xr.astype(C), axis=0)),
+    "jnp_1D_fft_jnp-fft":       _e(lambda xr: jnp.fft.fft(xr.astype(C), axis=0)),  # jnp reference (c64)
     # -- 1D rfft, direct (no trick) --
     "us_1D_rfft_reim":          _e(lambda xr: jax_rfft(xr, True, F)),
     "us_1D_rfft_reim-bf16":     _e(lambda xr: jax_rfft(xr.astype(BF), True, BF), dt=BF),
+    "us_1D_rfft_reim-int8":     _e(lambda xr: jax_rfft(xr.astype(I8), True, I8), dt=I8),  # naive int8, same as bf16
     "us_1D_rfft_direct-int8":   _e(lambda xr: jax_rfft_int8(xr, True)),
-    "us_1D_rfft_four-step":     _e(_rfft_hlo_auto),
+    "us_1D_rfft_conv-hlo":      _e(_rfft_hlo_auto),
     "us_1D_rfft_pallas":        _e(lambda xr: pallas_half(xr, K_TILE, _ITP, F)),
     "us_1D_rfft_pallas-bf16":   _e(lambda xr: pallas_half(xr, K_TILE, _ITP, BF), dt=BF),
     "us_1D_rfft_pallas_trickB": _e(lambda xr: pallas_trickB(xr, K_TILE, _ITP, F)),
     "jnp_1D_rfft_jnp-fft":      _e(lambda xr: jnp.fft.rfft(xr, axis=0)),
+    # -- 1D rfft tricks that stay REAL/IMAG (no complex64, no c64 custom-call) --
+    "us_1D_rfft_reimtrick_trickA": _e(lambda xr: rfft_trickA_reim(xr, 0.5, F)),
+    "us_1D_rfft_reimtrick_trickB": _e(lambda xr: rfft_trickB_reim(xr, 0.5, F)),
     # -- 2D rfft / fft --
     "us_2D_rfft_reim":          _e(jax_rfft2, dim=2),
     "us_2D_rfft_partial":       _e(lambda xr: rfft2_partial(xr, 0.5), dim=2),
@@ -118,7 +124,8 @@ CASES = {
     "all_2D":    _pick("_2D_"),
     "rfft_1D":   _pick("_1D_rfft_"),
     "tricks_1D": _pick("_1D_rfft_", "trick"),
-    "dtype_1D":  ["us_1D_rfft_reim", "us_1D_rfft_reim-bf16", "us_1D_rfft_direct-int8"],
+    "dtype_1D":  ["us_1D_rfft_reim", "us_1D_rfft_reim-bf16", "us_1D_rfft_reim-int8",
+                  "us_1D_rfft_direct-int8"],
 }
 
 
@@ -158,9 +165,29 @@ def _is_nlabel(s):
     return len(parts) in (1, 2) and all(p.isdigit() for p in parts)
 
 
+def _parse_engine(name):
+    """Split a systematic engine name `{who}_{dim}_{compute}_{method}[_{trick}]` into its parts
+    for per-column reporting:  us_1D_rfft_fft-iter_trickA -> (us, 1D, rfft, fft-iter, trickA).
+    The FULL name stays the primary key; these are just the broken-out facets."""
+    p = name.split("_")
+    who = p[0] if len(p) > 0 else name
+    dim = p[1] if len(p) > 1 else ""
+    compute = p[2] if len(p) > 2 else ""
+    method = p[3] if len(p) > 3 else ""
+    trick = p[4] if len(p) > 4 else ""
+    return who, dim, compute, method, trick
+
+
 def _build(spec, xj):
     """(jitted callable, input cast to the engine's dtype)."""
     return jax.jit(spec["fn"]), xj.astype(spec["dt"])
+
+
+def _prec_ctx(prec):
+    """Context that pins the XLA matmul precision for everything traced inside it:
+    'highest' = true f32 (3-pass on the bf16 MXU, ~1e-6 err, slower);
+    'default' = TPU default (single-pass bf16, ~5e-3 err, fast).  None = leave XLA's default."""
+    return jax.default_matmul_precision(prec) if prec else contextlib.nullcontext()
 
 
 def _make_input(N, K, dim):
@@ -211,16 +238,29 @@ def _cv(ts):
 
 
 # ─── correctness + real time ────────────────────────────────────────────────
-def compare(engines=None, case=None, Ns=(256, 1024, 16384), K=256, baseline=None):
+def _baseline_for(names, dim, override):
+    """The 1.00x anchor for engines of this `dim`: jax's OWN transform (`jnp_*_jnp-fft`), so every
+    engine (incl. ours) is measured vs jnp.rfft/fft as-is — never vs one of ours.  Prefer the rfft
+    jnp engine, then any jnp engine, then the first engine of that dim.  `override` wins if given."""
+    grp = [n for n in names if ENGINES[n]["dim"] == dim]
+    if override and override in grp:
+        return override
+    jn = [n for n in grp if "jnp-fft" in n]
+    return ([n for n in jn if "_rfft_" in n] or jn or grp)[0]
+
+
+def compare(engines=None, case=None, Ns=(256, 1024, 16384), K=256, baseline=None, prec=None):
     """Correctness (rel_err vs numpy) + median blocked wall-clock TIME per (N, engine).
-    x = time ratio vs `baseline` (defaults to the first engine listed)."""
+    x = time ratio vs the jnp baseline for that dim (jax's rfft/fft as-is; `baseline` overrides).
+    prec = 'highest' | 'default' | None pins the XLA matmul precision (accuracy vs speed)."""
     names = engines or (CASES[case] if case else list(ENGINES))
-    baseline = baseline or names[0]
+    dims = sorted({ENGINES[n]["dim"] for n in names})
+    base = {d: _baseline_for(names, d, baseline) for d in dims}  # dim -> 1.00x anchor
     title = case or ", ".join(names)
     tnote = "real" if BACKEND == "tpu" else f"{BACKEND} (pallas=emulation)"
     print("=" * 78)
     print(f"[{title}]   K={K}   backend={BACKEND}   time={tnote}   reps={TIME_REPS}   "
-          f"(x = vs {baseline})")
+          f"(x = vs {', '.join(base[d] for d in dims)})")
     print(f"  time = median of {TIME_REPS} runs;  cv% = std/mean (run-to-run noise);  "
           f"min = best run")
     print("=" * 78)
@@ -236,11 +276,13 @@ def compare(engines=None, case=None, Ns=(256, 1024, 16384), K=256, baseline=None
                 inp[d] = _make_input(N, K, d)
             xj, ref = inp[d]
             try:
-                fn, x = _build(ENGINES[n], xj)
-                res[n] = (fn(x), _times(fn, x), ref, d)
+                with _prec_ctx(prec):  # pin matmul precision at trace/compile time
+                    fn, x = _build(ENGINES[n], xj)
+                    res[n] = (fn(x), _times(fn, x), ref, d)
             except Exception as e:  # e.g. VMEM OOM at large N — don't kill the run
                 res[n] = ("ERR", repr(e)[:44], None, 0)
-        m0 = _median(res[baseline][1]) if res[baseline][0] != "ERR" else 1.0
+        m0 = {d: (_median(res[b][1]) if res[b][0] != "ERR" else None)  # per-dim jnp anchor time
+              for d, b in base.items()}
         for n in names:
             out, ts, ref, d = res[n]
             if out == "ERR":
@@ -248,7 +290,8 @@ def compare(engines=None, case=None, Ns=(256, 1024, 16384), K=256, baseline=None
                 continue
             rel = _relerr_dim(out, ref, d)
             med = _median(ts)
-            print(f"  {nl:>8} {n:>26} {rel:>10.1e} {_ft(med):>10} {med/m0:>5.2f}x "
+            xr = f"{med/m0[d]:>5.2f}x" if m0[d] else "   —  "
+            print(f"  {nl:>8} {n:>26} {rel:>10.1e} {_ft(med):>10} {xr} "
                   f"{_cv(ts):>5.1f}% {_ft(ts[0]):>10}")
         print()
 
@@ -271,7 +314,7 @@ def _profile_files(logdir):
     return out
 
 
-def profile(engines=None, case=None, Ns=(1024,), K=256, logdir="/tmp/tpu_prof", reps=15):
+def profile(engines=None, case=None, Ns=(1024,), K=256, logdir="/tmp/tpu_prof", reps=15, prec=None):
     """Capture a REAL device profile per (engine, N) with xprof — the only source of
     MEASURED mem / MXU% / VPU% / HBM bytes here.  Each (engine, N) is written to its OWN
     subdir `logdir/<engine>_N<N>/`, so each is a separate TensorBoard run you can flip
@@ -295,8 +338,9 @@ def profile(engines=None, case=None, Ns=(1024,), K=256, logdir="/tmp/tpu_prof", 
             if d not in inp:
                 inp[d] = _make_input(N, K, d)[0]
             try:
-                fn, x = _build(ENGINES[n], inp[d])
-                jax.block_until_ready(fn(x))  # warmup / compile OUTSIDE the trace
+                with _prec_ctx(prec):  # pin matmul precision at trace/compile time
+                    fn, x = _build(ENGINES[n], inp[d])
+                    jax.block_until_ready(fn(x))  # warmup / compile OUTSIDE the profiler trace
             except Exception as e:
                 print(f"  skip {n:>26} N={nl:<9} : {repr(e)[:55]}")
                 continue
@@ -509,39 +553,39 @@ def _read_timings(csv):
     return out
 
 
-def report(logdir="tpu/profiling/tpu_prof", timings="tpu/profiling/timings.csv",
-           out="tpu/profiling/PROFILING.md"):
-    """Write ONE combined report (Markdown) from the captured *.xplane.pb traces + timings.csv:
+def report(logdir="tpu/profiling/tpu_prof", out="tpu/profiling/PROFILING.md", exclude=()):
+    # exclude = substrings; any engine whose name contains one is dropped (e.g. ("int8", "pallas")).
+    """Write ONE report (Markdown) purely from the captured *.xplane.pb device traces:
       1. a 'verify in TensorBoard' map (which tab → each number),
       2. a summary table (sorted by N, ★ = fastest device time; memops = all data-movement),
       3. per (engine, N) RAW hlo_category breakdown — xprof Op-Profile categories, NO rollup.
-    All values are XLA's own device fields (device_duration_ps / hlo_category / bytes_accessed /
-    flops) — nothing estimated.  Returns the output path."""
-    wall = _read_timings(timings)
+    All values are XLA's own DEVICE fields (device_duration_ps / hlo_category / bytes_accessed /
+    flops) — device time only, no wall-clock, nothing estimated.  Returns the output path."""
     data = {}  # (engine, N) -> _xplane_stats
     for f in (sorted(os.listdir(logdir)) if os.path.isdir(logdir) else []):
         p = os.path.join(logdir, f)
         eng, sep, ns = f.rpartition("_N")  # ns = "1024" (1D) or "128x128" (2D)
         if not (os.path.isdir(p) and sep and _is_nlabel(ns)):
             continue
+        if any(x in eng for x in exclude):  # drop e.g. int8 / pallas on request
+            continue
         m = _xplane_stats(p)
         if m:
             data[(eng, ns)] = m
     Ns = sorted({N for (_e, N) in data}, key=_size)
-    L = [f"# TPU FFT profiling — {logdir}/ (xprof /device:TPU:0) + {os.path.basename(timings)}\n"]
+    L = [f"# TPU FFT profiling — {logdir}/ (xprof /device:TPU:0)\n"]
 
     L += ["## methodology",
           ("- capture: `bench_jax.profile()` = `jax.profiler.trace()` around 15 "
           "`block_until_ready(fn(x))` per (engine, N)."),
-          ("- device µs = Σ `XLA Ops` event `device_duration_ps` on /device:TPU:0 ÷ runs.  "
-          "wall µs = host `perf_counter` (= device + dispatch)."),
+          ("- device µs = Σ `XLA Ops` event `device_duration_ps` on /device:TPU:0 ÷ runs "
+          "(on-chip time only, NO host dispatch)."),
           ("- HBM = `memory_access_breakdown` mem-space-1 bytes ÷ runs.  "
           "AI = `flops` ÷ `bytes_accessed`.  category = XLA `hlo_category`.\n")]
 
     L += ["## verify in TensorBoard (open this trace; each number's source)",
           "| number here | TensorBoard tool → field |", "|---|---|",
           "| device µs/run | Trace Viewer → 'XLA Modules' block duration; or Op Profile → total self-time ÷ runs |",
-          "| wall µs/run | not in xprof — host `perf_counter` (= device + ~180µs dispatch) |",
           "| HBM MB/run | Memory Viewer → peak/bytes; or Op Profile → 'Bytes accessed' (HBM), ÷ runs |",
           "| AI (flop/byte) | Op Profile → 'FLOPs' ÷ 'Bytes accessed' |",
           "| MXU/VPU/memops/custom % | Op Profile → group by Category (rolled up from hlo_category) |",
@@ -551,23 +595,24 @@ def report(logdir="tpu/profiling/tpu_prof", timings="tpu/profiling/timings.csv",
     def g(x, f="{:.1f}"):
         return f.format(x) if x is not None else "—"
 
-    L += [("## summary  (sorted by N;  ★ = fastest device µs at that N;  "
-          "memops = copy+reshape+transpose+slice+gather+reverse+DMA)\n"),
-          "| N | engine | device µs | wall µs | gap µs | HBM MB | AI | MXU% | VPU% | memops% | custom% |",
-          "|" + "---|" * 11]
+    L += [("## summary  (sorted by N;  ★ = fastest device µs at that N;  the engine name is split "
+          "into who/D/func/method/trick facets;  memops = copy+reshape+transpose+slice+gather+"
+          "reverse+DMA)\n"),
+          "| N | engine | who | D | func | method | trick | device µs | HBM MB | AI "
+          "| MXU% | VPU% | memops% | custom% |",
+          "|" + "---|" * 14]
     for N in Ns:
         engs = [(e, n) for (e, n) in data if n == N]
         best = min(engs, key=lambda k: data[k]["per_run"])
         for (e, n) in sorted(engs, key=lambda k: data[k]["per_run"]):
             m = data[(e, n)]
             tot, c = m["total"] or 1.0, m["by_cat"]
-            w = wall.get((e, N))
-            wm = _median(w) * 1e6 if w else None
-            gap = (wm - m["per_run"]) if wm else None
             hbm = None if (m["hbm"] == 0 and m["opaque"]) else m["hbm"] / m["nruns"] / 1e6
             memops = (c.get("reshape / copy", 0) + c.get("DMA / HBM", 0)) / tot * 100
-            L.append(f"| {N} | {'★ ' if (e, n) == best else ''}{e} | {m['per_run']:.1f} | "
-                     f"{g(wm)} | {g(gap)} | {g(hbm, '{:.2f}')} | {m['ai']:.0f} | "
+            who, dim, comp, meth, trk = _parse_engine(e)
+            L.append(f"| {N} | {'★ ' if (e, n) == best else ''}{e} | {who} | {dim} | {comp} | "
+                     f"{meth} | {trk or '—'} | {m['per_run']:.1f} | "
+                     f"{g(hbm, '{:.2f}')} | {m['ai']:.0f} | "
                      f"{c.get('MXU matmul', 0)/tot*100:.0f} | {c.get('VPU / fusion', 0)/tot*100:.0f} | "
                      f"{memops:.0f} | {c.get('custom-call (fft)', 0)/tot*100:.0f} |")
 
@@ -668,5 +713,5 @@ if __name__ == "__main__":
     timings(case="all_1D", Ns=NS_1D, reps=15, out=TCSV)
     runs  = profile(case="all_1D", Ns=NS_1D, logdir=LOGDIR)   # xprof device capture
     runs += profile(case="all_2D", Ns=NS_2D, logdir=LOGDIR)
-    report(logdir=LOGDIR, timings=TCSV, out=MD)      # ONE combined PROFILING.md (sorted by N, ★)
+    report(logdir=LOGDIR, out=MD)                    # ONE device-time PROFILING.md (sorted by N, ★)
     print(f"\ndownload:  !zip -r {LOGDIR}.zip {LOGDIR}   (send me the zip + {MD})")

@@ -18,6 +18,7 @@ try:
         I32,
         B,
         F,
+        _fft_c,
         _fft_reim_real,
         dft_matrix,
     )
@@ -28,6 +29,7 @@ except ImportError:  # allow running from inside tpu/
         I32,
         B,
         F,
+        _fft_c,
         _fft_reim_real,
         dft_matrix,
     )
@@ -35,7 +37,16 @@ except ImportError:  # allow running from inside tpu/
 C = CDTYPE  # local alias (complex64)
 
 
-# ── complex radix-B FFT: iterative + recursive ───────────────────────────────
+def fft_reim(xr):
+    """Full N-bin FFT of REAL input (N, K), carried entirely in real/imag — no complex64.
+    Uses the OPTIMIZED real path `_fft_reim_real(half=False)` (first stage = 2 matmuls, not the
+    3-matmul Karatsuba of the general complex core), so it exploits the real input.  Returns
+    (re, im).  c64-free replacement for `fft_iter`/`fft_recur` in the engine registry."""
+    return _fft_reim_real(xr.astype(F), xr.shape[0], half=False)
+
+
+# ── complex64 radix-B FFT (iterative + recursive): reference algorithms, NOT wired into any engine
+#    (they build complex64; the bench uses the real/imag `fft_reim` above instead) ───────────────
 def fft_iter(x):
     """Iterative radix-B FFT of each column of x (N, K)  (or a 1-D length-N vector)."""
     one_d = (x.ndim == 1)
@@ -156,6 +167,45 @@ def rfft_trickA(xr, eng, ratio=0.5):
     A = 0.5 * (Z[:_N] + M_slice)     # rfft(a): (_N, K/2)
     Bb = -0.5j * (Z[:_N] - M_slice)  # rfft(b): (_N, K/2)
     return jnp.concatenate([A, Bb], axis=1)  # (_N, K)
+
+
+def rfft_trickA_reim(xr, ratio=0.5, dt=F):
+    """Trick A, but real/imag ALL THE WAY — no complex64, no `c64` custom-call.  Pack a,b -> z=a+ib,
+    ONE complex FFT via the real/imag core `_fft_c` (returns (Zr,Zi)), unpack in real/imag with
+    slice-reversal (gather-free), return (yr, yi).  Tests whether dropping the c64 assembly (~12%
+    of trick A's device time) is a net win."""
+    N, K = xr.shape
+    a, b = xr[:, :K // 2], xr[:, K // 2:]
+    Zr, Zi = _fft_c(a.astype(dt), b.astype(dt), N)
+    m = int(N * ratio)
+    m = m if m % 2 == 0 else m + 1
+    Mr = jnp.concatenate([Zr[:1], Zr[:0:-1]], axis=0)[:m]      # Re Z[(N-k)%N], gather-free
+    Mi = -jnp.concatenate([Zi[:1], Zi[:0:-1]], axis=0)[:m]     # -Im (conjugate)
+    Zr, Zi = Zr[:m], Zi[:m]
+    Ar, Ai = 0.5 * (Zr + Mr), 0.5 * (Zi + Mi)                  # rfft(a)
+    Br, Bi = 0.5 * (Zi - Mi), -0.5 * (Zr - Mr)                 # rfft(b) = -j(Z-conjZ')/2
+    return (jnp.concatenate([Ar, Br], axis=1).astype(dt),
+            jnp.concatenate([Ai, Bi], axis=1).astype(dt))
+
+
+def rfft_trickB_reim(xr, ratio=0.5, dt=F):
+    """Trick B, real/imag ALL THE WAY — no complex64.  Even/odd -> z=even+i*odd, ONE HALF-length
+    FFT via `_fft_c`, mirror via slice-reversal, twist X[k]=E[k]+W_N^k O[k] in real/imag, return
+    (yr, yi).  No c64 assembly."""
+    N, K = xr.shape
+    h = N // 2
+    x2 = xr.reshape(h, 2, K).astype(dt)
+    Zr, Zi = _fft_c(x2[:, 0, :], x2[:, 1, :], h)              # half-length FFT of even+i*odd
+    Mr = jnp.concatenate([Zr[:1], Zr[:0:-1]], axis=0)         # mirror M[k]=conj(Z[(h-k)%h])
+    Mi = -jnp.concatenate([Zi[:1], Zi[:0:-1]], axis=0)
+    Er, Ei = 0.5 * (Zr + Mr), 0.5 * (Zi + Mi)                 # even sub-DFT
+    Or_, Oi = 0.5 * (Zi - Mi), -0.5 * (Zr - Mr)               # odd sub-DFT = -0.5j(Z-M)
+    k = jnp.arange(h)
+    twr = jnp.cos(-2 * jnp.pi * k / N).astype(F)[:, None]
+    twi = jnp.sin(-2 * jnp.pi * k / N).astype(F)[:, None]
+    yr = Er + (twr * Or_ - twi * Oi)                          # X[k]=E[k]+W_N^k O[k]
+    yi = Ei + (twr * Oi + twi * Or_)
+    return yr.astype(dt), yi.astype(dt)
 
 
 def rfft_trickB(xr, eng, ratio=0.5):
