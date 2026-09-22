@@ -29,7 +29,7 @@ import os
 import sys
 import time
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 for _p in (_ROOT, os.path.join(_ROOT, "tpu")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -47,11 +47,11 @@ from tpu.fft1d.jax_fft import (
     rfft_trickB,
     rfft_trickB_reim,
 )
-from tpu.fft1d.pallas_fft import pallas_full, pallas_half, pallas_trickB
+from tpu.fft1d.experimental.pallas_fft import pallas_full, pallas_half, pallas_trickB
 from tpu.fft2d.jax_fft import jax_rfft2, rfft2_partial
-from tpu.fft2d.pallas_fft import pallas_rfft2
+from tpu.fft2d.experimental.pallas_fft import pallas_rfft2
 from tpu.fft_core import BF, F, I8
-from tpu.jnp_rfft_hlo import rfft_hlo  # our reconstruction of jnp.rfft's TPU four-step
+from tpu.experimental.jnp_rfft_hlo import rfft_hlo  # jnp.rfft's TPU four-step reconstruction
 
 C = jnp.complex64
 K_TILE = 128  # Pallas block width (must be a multiple of 128)
@@ -103,7 +103,9 @@ ENGINES = {
     "us_1D_rfft_reimtrick_trickB": _e(lambda xr: rfft_trickB_reim(xr, 0.5, F)),
     # -- 2D rfft / fft --
     "us_2D_rfft_reim":          _e(jax_rfft2, dim=2),
+    "us_2D_rfft_reim-bf16":     _e(lambda xr: jax_rfft2(xr.astype(BF), BF), dim=2, dt=BF),
     "us_2D_rfft_partial":       _e(lambda xr: rfft2_partial(xr, 0.5), dim=2),
+    "us_2D_rfft_partial-bf16":  _e(lambda xr: rfft2_partial(xr.astype(BF), 0.5, BF), dim=2, dt=BF),
     "us_2D_rfft_pallas":        _e(lambda xr: pallas_rfft2(xr, K_TILE, _ITP, F), dim=2),
     "jnp_2D_rfft_jnp-fft":      _e(lambda xr: jnp.fft.rfft2(xr, axes=(0, 1)), dim=2),
     "jnp_2D_fft_jnp-fft":       _e(lambda xr: jnp.fft.fft2(xr.astype(C), axes=(0, 1)), dim=2),

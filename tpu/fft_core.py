@@ -11,7 +11,13 @@ Pallas.  Pure jnp numerics (no pallas_call here):
 The entry points live in tpu/fft1d/{jax_fft,pallas_fft}.py and tpu/fft2d/{jax_fft,pallas_fft}.py
 and all import their numerics from here — so the radix-B pass is written once.
 """
+import jax
 import jax.numpy as jnp
+
+# Memory-bound on v5e: the extra MXU passes of true-f32 matmuls hide behind the HBM wait, so
+# 'highest' precision is FREE here (measured Δtime 0, accuracy Δ +0.0008). Set it globally, once,
+# for every module that imports fft_core (FFT + FNO + Pallas). No per-call precision= needed.
+jax.config.update("jax_default_matmul_precision", "highest")
 
 B = 128
 F = jnp.float32

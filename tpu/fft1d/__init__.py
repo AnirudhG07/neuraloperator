@@ -1,13 +1,4 @@
-"""1D radix-B FFT: pure-JAX (jax_fft) and VMEM-resident Pallas (pallas_fft)."""
-from .jax_fft import (
-    fft_iter,
-    fft_recur,
-    fft_reim,
-    jax_rfft,
-    jax_rfft_int8,
-    rfft_trickA,
-    rfft_trickA_reim,
-    rfft_trickB,
-    rfft_trickB_reim,
-)
-from .pallas_fft import pallas_full, pallas_half, pallas_trickB
+"""1D radix-B FFT.  Production (fastest-correct): jax_rfft (reim real/imag rfft).
+Everything else — the c64 reference FFTs, the packing tricks, int8, and the VMEM-resident
+Pallas kernels — lives under fft1d/experimental/."""
+from .jax_fft import jax_rfft

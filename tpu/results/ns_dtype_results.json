@@ -1,0 +1,34 @@
+[
+  {
+    "tag": "fp32-default",
+    "dt": "float32",
+    "precision": "default",
+    "relL2": 0.2284596562385559,
+    "ms_per_pass": 42.362324999999146,
+    "us_per_sample": 105.90581249999786
+  },
+  {
+    "tag": "fp32-highest",
+    "dt": "float32",
+    "precision": "highest",
+    "relL2": 0.22832097113132477,
+    "ms_per_pass": 42.365296000070884,
+    "us_per_sample": 105.91324000017721
+  },
+  {
+    "tag": "bf16",
+    "dt": "bfloat16",
+    "precision": "None",
+    "relL2": 0.22849427163600922,
+    "ms_per_pass": 42.18616599996494,
+    "us_per_sample": 105.46541499991235
+  },
+  {
+    "tag": "int8",
+    "dt": "int8",
+    "precision": "None",
+    "relL2": 1.0,
+    "ms_per_pass": 42.05994699998428,
+    "us_per_sample": 105.14986749996069
+  }
+]

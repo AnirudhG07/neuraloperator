@@ -45,6 +45,26 @@ def fft_reim(xr):
     return _fft_reim_real(xr.astype(F), xr.shape[0], half=False)
 
 
+def rfft1d_partial(xr, m, dt=F):
+    """1D PARTIAL rfft: compute ONLY the first m modes of a real (N, K) input, as a direct
+    (m x N) real/imag DFT matmul (2 matmuls) — no full FFT, no staging, no transpose.  ONE HBM
+    pass (read x once, write the tiny (m, K) result).  Returns (yr, yi), each (m, K).
+    Feasible only for m << N: the (m, N) DFT matrix is O(m*N) (a ratio-0.5 m=N/2 would be O(N^2)).
+    Trades cheap MXU flops for fewer HBM passes than the staged radix rfft — the win when m is small
+    and the transform is memory-bound (the 1D analogue of rfft2_partial)."""
+    N, K = xr.shape
+    a = -2.0 * jnp.pi * jnp.outer(jnp.arange(m, dtype=F), jnp.arange(N, dtype=F)) / N
+    Cr, Ci = jnp.cos(a).astype(dt), jnp.sin(a).astype(dt)         # (m, N)
+    x = xr.astype(dt)
+    yr = jnp.matmul(Cr, x, preferred_element_type=jnp.float32)    # (m, K)
+    yi = jnp.matmul(Ci, x, preferred_element_type=jnp.float32)
+    return yr, yi
+
+
+# (rfft_pruned removed — decimation-pruned FFT tested 5x slower than the direct partial at FNO
+#  sizes; multi-pass loses to one matmul on the memory-bound TPU.  See results/fft_engines_reassess.md)
+
+
 # ── complex64 radix-B FFT (iterative + recursive): reference algorithms, NOT wired into any engine
 #    (they build complex64; the bench uses the real/imag `fft_reim` above instead) ───────────────
 def fft_iter(x):

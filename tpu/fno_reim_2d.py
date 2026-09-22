@@ -34,9 +34,7 @@ except ImportError:
 gelu = jax.nn.gelu
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  THE MODEL — one forward function.  Read this first.
-# ═══════════════════════════════════════════════════════════════════════════
+#  THE MODEL — one forward function.
 def fno_forward(P, x):
     """P = the whole weight tree, x = (B, in_ch, H, W) real field  ->  (B, out_ch, H, W)."""
     x = add_grid(x)                                   # append (x,y) coordinate channels
@@ -52,9 +50,7 @@ def fno_forward(P, x):
     return channel_mlp(P["proj"], x)                  # PROJECT: width -> out_ch
 
 
-# ═══════════════════════════════════════════════════════════════════════════
 #  The spectral path, as three named steps (FFT -> filter -> iFFT), all real/imag.
-# ═══════════════════════════════════════════════════════════════════════════
 def _dft(m, L, sign):
     """(cos, sin) rows of a length-L DFT kept to m modes.  sign=-1 forward, +1 inverse."""
     k = jnp.arange(m)[:, None]
@@ -98,9 +94,7 @@ def ifft2_real(gr, gi, H, W):
     return (u / (H * W)).astype(F)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
 #  The plain (non-spectral) helpers.
-# ═══════════════════════════════════════════════════════════════════════════
 def add_grid(x):
     """Append normalized (x, y) coordinate channels so the net knows absolute position."""
     B, _, H, W = x.shape
@@ -124,9 +118,7 @@ def modes_of(blk):
     return blk["filter"]["w_re"].shape[-1]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
 #  Weight initialisation — mirrors fno_forward's tree exactly.
-# ═══════════════════════════════════════════════════════════════════════════
 def _conv1x1(key, cin, cout):
     std = (2.0 / (cin + cout)) ** 0.5
     return {"W": std * jax.random.normal(key, (cout, cin)), "b": jnp.zeros((cout,))}
@@ -185,9 +177,38 @@ def save_burgers_npz(path):
     return path
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+def load_ns(root, res=128, n_train=2000, n_test=400):
+    """neuralop Navier-Stokes forcing .pt (Zenodo 12825163) -> (x,y) 2D fields, (B,1,H,W),
+    standardized.  Subsamples n_train/n_test to keep the 128x128 run tractable.  Handles both
+    (N,H,W) and (N,C,H,W) layouts."""
+    import torch
+    tr = torch.load(os.path.join(root, f"nsforcing_train_{res}.pt"), weights_only=False)
+    te = torch.load(os.path.join(root, f"nsforcing_test_{res}.pt"), weights_only=False)
+    def get(d, n):
+        x = np.asarray(d["x"], np.float32)[:n]
+        y = np.asarray(d["y"], np.float32)[:n]
+        if x.ndim == 3:
+            x = x[:, None]                                   # (N,H,W) -> (N,1,H,W)
+        if y.ndim == 3:
+            y = y[:, None]
+        if x.ndim == 4 and x.shape[1] != 1:                  # (N,C,H,W): use first channel in
+            x = x[:, :1]
+        if y.ndim == 4 and y.shape[1] != 1:
+            y = y[:, :1]
+        return x, y
+    xtr, ytr = get(tr, n_train)
+    xte, yte = get(te, n_test)
+    xm, xs, ym, ys = xtr.mean(), xtr.std() + 1e-8, ytr.mean(), ytr.std() + 1e-8
+    return (xtr - xm) / xs, (ytr - ym) / ys, (xte - xm) / xs, (yte - ym) / ys
+
+
+def save_ns_npz(root, path, res=128, n_train=2000, n_test=400):
+    xtr, ytr, xte, yte = load_ns(root, res, n_train, n_test)
+    np.savez(path, xtr=xtr, ytr=ytr, xte=xte, yte=yte)
+    return path
+
+
 #  Darcy data + training loop.
-# ═══════════════════════════════════════════════════════════════════════════
 def load_darcy(res=16, root=None):
     """neuralop Darcy .pt -> (x_train, y_train, x_test, y_test), (B,1,H,W), standardized."""
     import torch
@@ -259,8 +280,54 @@ def inference_time(P, x, reps=50, trace_dir=None, tag="darcy"):
             "samples_per_s": n / med}
 
 
+def infer_bench(P, x, y, dt=F, precision=None, reps=30, tag=""):
+    """Inference time + accuracy at a given operand dtype / matmul precision.  Casts the weights
+    and input to `dt` (fp32/bf16/int8) and pins matmul `precision` ('highest'/'default'/None);
+    the FNO accumulates in f32.  Returns {dt, precision, relL2, us_per_sample, ms_per_pass}."""
+    import contextlib
+    import time
+    Pc = jax.tree_util.tree_map(lambda a: a.astype(dt), P)
+    xc = x.astype(dt)
+    ctx = jax.default_matmul_precision(precision) if precision else contextlib.nullcontext()
+    with ctx:
+        fn = jax.jit(lambda z: fno_forward(Pc, z))
+        pred = jax.block_until_ready(fn(xc))                # compile + warmup
+    rl = float(rel_l2(jnp.asarray(pred, F), y))
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        jax.block_until_ready(fn(xc))
+        ts.append(time.perf_counter() - t0)
+    ts = sorted(ts)
+    med, n = ts[len(ts) // 2], x.shape[0]
+    dn = getattr(dt, "__name__", str(dt))
+    print(f"  {tag:>18}  dt={dn:8} prec={precision!s:7}  relL2={rl:.4e}  "
+          f"{med*1e3:.3f} ms/pass  {med/n*1e6:.2f} us/sample")
+    return {"tag": tag, "dt": dn, "precision": str(precision), "relL2": rl,
+            "ms_per_pass": med * 1e3, "us_per_sample": med / n * 1e6}
+
+
+def save_params(P, path, meta=None):
+    """Persist the trained weight tree to an .npz (leaves in tree order + shape/config meta), so
+    inference / new-kernel work can reload WITHOUT retraining.  `meta` = dict of ints/strings."""
+    leaves = [np.asarray(a) for a in jax.tree_util.tree_leaves(P)]
+    extra = {f"meta__{k}": np.asarray(v) for k, v in (meta or {}).items()}
+    np.savez(path, *leaves, **extra)
+    return path
+
+
+def load_params(path, width, m, n_layers=4, in_ch=1, out_ch=1, seed=0):
+    """Reload weights saved by save_params.  Pass the SAME width/m/n_layers used to train.
+    Returns the params pytree ready for fno_forward."""
+    d = np.load(path)
+    leaves = [jnp.asarray(d[f"arr_{i}"]) for i in range(len([k for k in d.files if k.startswith("arr_")]))]
+    _, treedef = jax.tree_util.tree_flatten(
+        init_fno(jax.random.PRNGKey(seed), in_ch, out_ch, width, m, n_layers))
+    return jax.tree_util.tree_unflatten(treedef, leaves)
+
+
 def train(name, xtr, ytr, xte, yte, width=24, m=16, n_layers=4, steps=300, batch=8, lr=5e-3,
-          weight_decay=1e-4, step_size=60, gamma=0.5, seed=0, out=None):
+          weight_decay=1e-4, step_size=60, gamma=0.5, seed=0, out=None, save=None):
     """Train the FNO with the neuralop-config recipe: AdamW (weight_decay) + StepLR
     (lr *= gamma every step_size epochs).  Architecture defaults = FNO_Small2d.
     Returns (params, (x_test, y_test), loss_rows)."""
@@ -297,30 +364,45 @@ def train(name, xtr, ytr, xte, yte, width=24, m=16, n_layers=4, steps=300, batch
             print(f"  epoch {ep:4d}  train_mse {tr:.4e}  test_mse {te:.4e}  test_relL2 {rl:.4e}")
     if out:
         with open(out, "w") as fh:
-            for r in rows:
-                fh.write(",".join(str(v) for v in r) + "\n")
-        print(f"wrote loss log -> {out}")
+            fh.writelines(",".join(str(v) for v in r) + "\n" for r in rows)
+        print(f"wrote loss log -> {out}", flush=True)
+    if save:                                            # persist tensors NOW (survives later hangs)
+        save_params(P, save, meta={"width": width, "m": m, "n_layers": n_layers})
+        print(f"saved trained tensors -> {save}", flush=True)
     return P, (xte, yte), rows
 
 
-def train_darcy(res=32, steps=300, npz=None, out="tpu/fno_darcy_train_log.csv"):
-    """Darcy, repo config (FNO_Small2d): lr 5e-3, batch 8, StepLR(60,0.5), wd 1e-4."""
+def train_darcy(res=32, steps=300, npz=None, out="tpu/fno_darcy_train_log.csv",
+                width=24, m=16, lr=5e-3, batch=8, save=None):
+    """Darcy.  Small default = FNO_Small2d; pass width=32,m=12,steps=500 for the paper config."""
     if npz:
         d = np.load(npz); data = (d["xtr"], d["ytr"], d["xte"], d["yte"])
     else:
         data = load_darcy(res)
-    return train("darcy", *data, width=24, m=16, n_layers=4, steps=steps, batch=8, lr=5e-3,
-                 weight_decay=1e-4, step_size=60, gamma=0.5, out=out)
+    return train("darcy", *data, width=width, m=m, n_layers=4, steps=steps, batch=batch, lr=lr,
+                 weight_decay=1e-4, step_size=100, gamma=0.5, out=out, save=save)
 
 
-def train_burgers(steps=300, npz=None, out="tpu/fno_burgers_train_log.csv"):
+def train_burgers(steps=300, npz=None, out="tpu/fno_burgers_train_log.csv", save=None):
     """Burgers (2D time-space), repo config: lr 1e-4, batch 16, StepLR(60,0.5), wd 1e-4."""
     if npz:
         d = np.load(npz); data = (d["xtr"], d["ytr"], d["xte"], d["yte"])
     else:
         data = load_burgers()
     return train("burgers", *data, width=24, m=16, n_layers=4, steps=steps, batch=16, lr=1e-4,
-                 weight_decay=1e-4, step_size=60, gamma=0.5, out=out)
+                 weight_decay=1e-4, step_size=60, gamma=0.5, out=out, save=save)
+
+
+def train_ns(root=None, npz=None, steps=300, out="tpu/fno_ns_train_log.csv",
+             width=24, m=16, lr=5e-3, batch=8, save=None):
+    """Navier-Stokes 128x128 (real Zenodo data).  Small default; for a real result at 128² pass
+    more modes (m=32) + width=32 + steps=500 — 16 of 64 modes truncates NS turbulence."""
+    if npz:
+        d = np.load(npz); data = (d["xtr"], d["ytr"], d["xte"], d["yte"])
+    else:
+        data = load_ns(root)
+    return train("navier-stokes", *data, width=width, m=m, n_layers=4, steps=steps, batch=batch,
+                 lr=lr, weight_decay=1e-4, step_size=100, gamma=0.5, out=out, save=save)
 
 
 if __name__ == "__main__":

@@ -87,3 +87,7 @@ neuralop/data/datasets/data/darcy_32.tgz
 neuralop/datasets/data/nsforcing_128.tgz
 /tpu/profiling/tpu_prof
 /tpu/traces**
+# TPU work: xprof traces are large and machine-specific — never commit them
+tpu/traces/
+*.xplane.pb
+*.trace.json.gz
