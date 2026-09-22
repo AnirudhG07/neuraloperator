@@ -21,7 +21,7 @@ _PARALLEL = pltpu.CompilerParams(dimension_semantics=("parallel",))
 def _rfft2_body(xr, N1, N2, dt):
     """2D rfft of one (N1,N2,K_TILE) real block in VMEM: real rfft on axis-0, complex DFT axis-1."""
     K = xr.shape[2]
-    Ar, Ai = _fft_reim_real(xr.reshape(N1, N2 * K), N1, half=True, dt=dt)
+    Ar, Ai = _fft_reim_real(xr.reshape(N1, N2 * K), N1, half=True, dtype=dt)
     R = N1 // 2
     Ar, Ai = Ar.reshape(R, N2, K), Ai.reshape(R, N2, K)
     return _dft_axis1(Ar, Ai, N2, dt=dt)

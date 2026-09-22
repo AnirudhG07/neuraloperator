@@ -98,3 +98,30 @@ def test_training_reduces_error():
     _, rel, _ = train.train(x, y, x[:8], y[:8], n_modes=4, channels=8, n_layers=2,
                             steps=6, batch=8, log_every=5, verbose=False)
     assert rel < 1.0
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+def test_dtype_argument_is_threaded_through(dtype):
+    """The bf16 path is the fastest engine on device, so the dtype kwarg must reach every
+    caller — including the experimental ones that import these under their old aliases."""
+    from ..experimental.fft import rfft2_hybrid
+
+    x = jnp.asarray(np.random.default_rng(10).standard_normal((256, 8)), jnp.float32)
+    re, im = core.rfft_staged(x, 256, half=True, dtype=dtype)
+    assert re.dtype == dtype and im.dtype == dtype
+
+    field = jnp.asarray(np.random.default_rng(11).standard_normal((128, 32, 4)), jnp.float32)
+    hyb_re, _ = rfft2_hybrid.rfft2_hybrid(field, 8, 8, dt=dtype)
+    exact = np.fft.fft2(np.asarray(field), axes=(0, 1))[:8, :8]
+    assert _rel(hyb_re.astype(jnp.float32), exact.real) < (2e-1 if dtype == jnp.bfloat16 else 1e-4)
+
+
+def test_hybrid_matches_the_main_low_mode_transform():
+    """rfft2_hybrid takes a different route to the same modes; it must land in the same place."""
+    from ..experimental.fft import rfft2_hybrid
+
+    field = jnp.asarray(np.random.default_rng(12).standard_normal((128, 32, 4)), jnp.float32)
+    want_re, want_im = rfft2d.rfft2_low_modes(field, ratio=0.25)
+    got_re, got_im = rfft2_hybrid.rfft2_hybrid(field, want_re.shape[0], want_re.shape[1])
+    assert _rel(got_re, want_re) < 1e-4
+    assert _rel(got_im, want_im) < 1e-4

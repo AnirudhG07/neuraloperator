@@ -24,7 +24,7 @@ def rfft2_hybrid(xr, m1, m2, axis0="reim", rows="partial", dt=F):
     elif axis0 == "trickB":
         Ar, Ai = rfft_trickB_reim(x2, m1 / N1, dt)               # full real rfft (trick B), m1 modes
     else:
-        Ar, Ai = _fft_reim_real(x2, N1, half=True, dt=dt)        # full staged real rfft
+        Ar, Ai = _fft_reim_real(x2, N1, half=True, dtype=dt)        # full staged real rfft
     Ar, Ai = Ar[:m1].reshape(m1, N2, K), Ai[:m1].reshape(m1, N2, K)   # keep low m1 col-modes
     if rows == "staged":                                          # staged FFT on axis-1 + truncate
         Ar2 = Ar.transpose(1, 0, 2).reshape(N2, m1 * K)          # N2 -> front (needs transpose)
